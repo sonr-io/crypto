@@ -11,7 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/core/curves"
 )
 
 func Test_Membership_Witness_New(t *testing.T) {

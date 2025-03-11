@@ -19,7 +19,7 @@ import (
 	"github.com/bwesterb/go-ristretto"
 	ed "github.com/bwesterb/go-ristretto/edwards25519"
 
-	"github.com/onsonr/sonr/crypto/internal"
+	"github.com/go-sonr/crypto/internal"
 )
 
 type ScalarEd25519 struct {

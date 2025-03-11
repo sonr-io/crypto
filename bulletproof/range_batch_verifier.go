@@ -4,7 +4,7 @@ import (
 	"github.com/gtank/merlin"
 	"github.com/pkg/errors"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/core/curves"
 )
 
 // VerifyBatched verifies a given batched range proof.

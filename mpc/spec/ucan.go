@@ -6,9 +6,9 @@ import (
 	"time"
 
 	"github.com/cosmos/cosmos-sdk/types/bech32"
+	"github.com/go-sonr/crypto/keys"
+	"github.com/go-sonr/crypto/ucan"
 	"github.com/golang-jwt/jwt"
-	"github.com/onsonr/sonr/crypto/keys"
-	"github.com/onsonr/sonr/crypto/ucan"
 )
 
 type (

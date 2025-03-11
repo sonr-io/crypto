@@ -15,7 +15,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/core/curves"
 )
 
 func AggregateSignatures(sig1, sig2 *PartialSignature) []byte {

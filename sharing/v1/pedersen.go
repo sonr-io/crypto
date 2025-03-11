@@ -12,8 +12,8 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
-	"github.com/onsonr/sonr/crypto/internal"
+	"github.com/go-sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/internal"
 )
 
 // Pedersen Verifiable Secret Sharing Scheme

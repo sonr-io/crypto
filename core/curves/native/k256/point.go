@@ -3,9 +3,9 @@ package k256
 import (
 	"sync"
 
-	"github.com/onsonr/sonr/crypto/core/curves/native"
-	"github.com/onsonr/sonr/crypto/core/curves/native/k256/fp"
-	"github.com/onsonr/sonr/crypto/internal"
+	"github.com/go-sonr/crypto/core/curves/native"
+	"github.com/go-sonr/crypto/core/curves/native/k256/fp"
+	"github.com/go-sonr/crypto/internal"
 )
 
 var (

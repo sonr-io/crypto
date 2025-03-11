@@ -12,7 +12,7 @@ import (
 
 	"git.sr.ht/~sircmpwn/go-bare"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/core/curves"
 )
 
 // SecretKey is the secret alpha only held by the accumulator manager.

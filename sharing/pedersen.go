@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/core/curves"
 )
 
 // Pedersen Verifiable Secret Sharing Scheme

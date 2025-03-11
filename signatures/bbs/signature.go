@@ -11,7 +11,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/core/curves"
 )
 
 // Signature is a BBS+ signature

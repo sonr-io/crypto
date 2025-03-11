@@ -12,10 +12,10 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
-	"github.com/onsonr/sonr/crypto/ot/base/simplest"
-	"github.com/onsonr/sonr/crypto/ot/extension/kos"
-	"github.com/onsonr/sonr/crypto/ot/ottest"
+	"github.com/go-sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/ot/base/simplest"
+	"github.com/go-sonr/crypto/ot/extension/kos"
+	"github.com/go-sonr/crypto/ot/ottest"
 )
 
 func TestMultiply(t *testing.T) {

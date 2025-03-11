@@ -9,9 +9,9 @@ package bls_sig
 import (
 	"fmt"
 
-	"github.com/onsonr/sonr/crypto/core/curves/native"
-	"github.com/onsonr/sonr/crypto/core/curves/native/bls12381"
-	"github.com/onsonr/sonr/crypto/internal"
+	"github.com/go-sonr/crypto/core/curves/native"
+	"github.com/go-sonr/crypto/core/curves/native/bls12381"
+	"github.com/go-sonr/crypto/internal"
 )
 
 // Implement BLS signatures on the BLS12-381 curve

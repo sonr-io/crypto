@@ -9,7 +9,7 @@ package mina
 import (
 	"fmt"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/core/curves"
 )
 
 type MinaTSchnorrHandler struct{}

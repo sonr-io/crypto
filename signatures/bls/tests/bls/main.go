@@ -15,7 +15,7 @@ import (
 	"io/ioutil"
 	"os"
 
-	bls "github.com/onsonr/sonr/crypto/signatures/bls/bls_sig"
+	bls "github.com/go-sonr/crypto/signatures/bls/bls_sig"
 )
 
 type signOp struct {

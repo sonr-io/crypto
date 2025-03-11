@@ -20,11 +20,11 @@ import (
 	"github.com/pkg/errors"
 	"golang.org/x/crypto/sha3"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
-	"github.com/onsonr/sonr/crypto/ot/base/simplest"
-	"github.com/onsonr/sonr/crypto/ot/extension/kos"
-	"github.com/onsonr/sonr/crypto/tecdsa/dklsv1/dkg"
-	"github.com/onsonr/sonr/crypto/zkp/schnorr"
+	"github.com/go-sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/ot/base/simplest"
+	"github.com/go-sonr/crypto/ot/extension/kos"
+	"github.com/go-sonr/crypto/tecdsa/dklsv1/dkg"
+	"github.com/go-sonr/crypto/zkp/schnorr"
 )
 
 const multiplicationCount = 2

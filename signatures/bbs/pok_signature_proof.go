@@ -12,8 +12,8 @@ import (
 
 	"github.com/gtank/merlin"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
-	"github.com/onsonr/sonr/crypto/signatures/common"
+	"github.com/go-sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/signatures/common"
 )
 
 // PokSignatureProof is the actual proof sent from a prover

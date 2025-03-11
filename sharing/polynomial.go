@@ -9,7 +9,7 @@ package sharing
 import (
 	"io"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/core/curves"
 )
 
 type Polynomial struct {

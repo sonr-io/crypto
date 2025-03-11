@@ -7,7 +7,7 @@
 package v1
 
 import (
-	"github.com/onsonr/sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/core/curves"
 )
 
 type polynomial struct {

@@ -9,7 +9,7 @@ package frost
 import (
 	"crypto/sha512"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/core/curves"
 )
 
 type ChallengeDerive interface {

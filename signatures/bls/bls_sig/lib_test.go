@@ -13,8 +13,8 @@ import (
 	"math/big"
 	"testing"
 
-	"github.com/onsonr/sonr/crypto/core/curves/native/bls12381"
-	"github.com/onsonr/sonr/crypto/internal"
+	"github.com/go-sonr/crypto/core/curves/native/bls12381"
+	"github.com/go-sonr/crypto/internal"
 )
 
 func genSecretKey(t *testing.T) *SecretKey {

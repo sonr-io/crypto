@@ -8,9 +8,9 @@ import (
 	"math/big"
 
 	"github.com/cosmos/cosmos-sdk/types/bech32"
-	"github.com/onsonr/sonr/crypto/core/curves"
-	"github.com/onsonr/sonr/crypto/core/protocol"
-	"github.com/onsonr/sonr/crypto/tecdsa/dklsv1"
+	"github.com/go-sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/core/protocol"
+	"github.com/go-sonr/crypto/tecdsa/dklsv1"
 	"golang.org/x/crypto/sha3"
 )
 

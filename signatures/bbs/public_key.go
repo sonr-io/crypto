@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/core/curves"
 )
 
 // PublicKey is a BBS+ verification key

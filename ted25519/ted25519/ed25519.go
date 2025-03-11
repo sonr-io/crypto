@@ -22,7 +22,7 @@ import (
 	"io"
 	"strconv"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/core/curves"
 )
 
 const (

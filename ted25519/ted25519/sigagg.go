@@ -10,8 +10,8 @@ import (
 	"bytes"
 	"fmt"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
-	v1 "github.com/onsonr/sonr/crypto/sharing/v1"
+	"github.com/go-sonr/crypto/core/curves"
+	v1 "github.com/go-sonr/crypto/sharing/v1"
 )
 
 type Signature = []byte

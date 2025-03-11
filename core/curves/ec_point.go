@@ -12,10 +12,10 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/onsonr/sonr/crypto/core"
+	"github.com/go-sonr/crypto/core"
 
 	"github.com/dustinxie/ecc"
-	"github.com/onsonr/sonr/crypto/internal"
+	"github.com/go-sonr/crypto/internal"
 )
 
 var curveNameToID = map[string]byte{

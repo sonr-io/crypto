@@ -7,7 +7,7 @@
 package mina
 
 import (
-	"github.com/onsonr/sonr/crypto/core/curves/native/pasta/fp"
+	"github.com/go-sonr/crypto/core/curves/native/pasta/fp"
 )
 
 // SBox is the type of exponentiation to perform

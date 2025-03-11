@@ -13,8 +13,8 @@ import (
 
 	"github.com/pkg/errors"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
-	"github.com/onsonr/sonr/crypto/internal"
+	"github.com/go-sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/internal"
 )
 
 // Round1Bcast contains values to be broadcast to all players after the completion of signing round 1.

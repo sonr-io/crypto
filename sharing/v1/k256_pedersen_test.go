@@ -13,7 +13,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/stretchr/testify/require"
 
-	core "github.com/onsonr/sonr/crypto/core/curves"
+	core "github.com/go-sonr/crypto/core/curves"
 )
 
 var (

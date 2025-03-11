@@ -15,9 +15,9 @@ import (
 
 	"github.com/pkg/errors"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
-	"github.com/onsonr/sonr/crypto/internal"
-	"github.com/onsonr/sonr/crypto/sharing"
+	"github.com/go-sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/internal"
+	"github.com/go-sonr/crypto/sharing"
 )
 
 // Round1Bcast are values that are broadcast to all other participants

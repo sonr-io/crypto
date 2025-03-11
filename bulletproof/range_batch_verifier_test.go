@@ -7,7 +7,7 @@ import (
 	"github.com/gtank/merlin"
 	"github.com/stretchr/testify/require"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/core/curves"
 )
 
 func TestRangeBatchVerifyHappyPath(t *testing.T) {

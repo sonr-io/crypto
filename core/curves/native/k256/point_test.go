@@ -5,8 +5,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/onsonr/sonr/crypto/core/curves/native"
-	"github.com/onsonr/sonr/crypto/core/curves/native/k256"
+	"github.com/go-sonr/crypto/core/curves/native"
+	"github.com/go-sonr/crypto/core/curves/native/k256"
 )
 
 func TestK256PointArithmetic_Hash(t *testing.T) {

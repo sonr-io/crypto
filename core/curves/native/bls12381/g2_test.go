@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/onsonr/sonr/crypto/core/curves/native"
+	"github.com/go-sonr/crypto/core/curves/native"
 )
 
 func TestG2IsOnCurve(t *testing.T) {

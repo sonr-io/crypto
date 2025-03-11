@@ -11,9 +11,9 @@ import (
 	"crypto/elliptic"
 	"fmt"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
-	"github.com/onsonr/sonr/crypto/internal"
-	v1 "github.com/onsonr/sonr/crypto/sharing/v1"
+	"github.com/go-sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/internal"
+	v1 "github.com/go-sonr/crypto/sharing/v1"
 )
 
 // Participant is a DKG player that contains information needed to perform DKG rounds

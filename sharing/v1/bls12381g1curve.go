@@ -11,9 +11,9 @@ import (
 	"math/big"
 	"sync"
 
-	"github.com/onsonr/sonr/crypto/core/curves/native"
-	"github.com/onsonr/sonr/crypto/core/curves/native/bls12381"
-	"github.com/onsonr/sonr/crypto/internal"
+	"github.com/go-sonr/crypto/core/curves/native"
+	"github.com/go-sonr/crypto/core/curves/native/bls12381"
+	"github.com/go-sonr/crypto/internal"
 )
 
 var (

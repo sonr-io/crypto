@@ -7,8 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
-	"github.com/onsonr/sonr/crypto/keys"
+	"github.com/go-sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/keys"
 	"golang.org/x/crypto/sha3"
 )
 

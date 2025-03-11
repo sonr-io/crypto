@@ -13,8 +13,8 @@ import (
 	"github.com/gtank/merlin"
 	"github.com/stretchr/testify/require"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
-	"github.com/onsonr/sonr/crypto/signatures/common"
+	"github.com/go-sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/signatures/common"
 )
 
 func TestPokSignatureProofSomeMessagesRevealed(t *testing.T) {

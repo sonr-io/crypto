@@ -11,7 +11,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/onsonr/sonr/crypto/core/curves/native/pasta/fq"
+	"github.com/go-sonr/crypto/core/curves/native/pasta/fq"
 )
 
 func TestNewKeys(t *testing.T) {

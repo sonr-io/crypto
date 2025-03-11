@@ -9,7 +9,7 @@ package bbs
 import (
 	"errors"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/core/curves"
 )
 
 // MessageGenerators are used to sign a vector of commitments for

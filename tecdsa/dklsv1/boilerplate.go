@@ -5,11 +5,11 @@ import (
 
 	"github.com/pkg/errors"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
-	"github.com/onsonr/sonr/crypto/core/protocol"
-	"github.com/onsonr/sonr/crypto/tecdsa/dklsv1/dkg"
-	"github.com/onsonr/sonr/crypto/tecdsa/dklsv1/refresh"
-	"github.com/onsonr/sonr/crypto/tecdsa/dklsv1/sign"
+	"github.com/go-sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/core/protocol"
+	"github.com/go-sonr/crypto/tecdsa/dklsv1/dkg"
+	"github.com/go-sonr/crypto/tecdsa/dklsv1/refresh"
+	"github.com/go-sonr/crypto/tecdsa/dklsv1/sign"
 )
 
 // AliceDkg DKLS DKG implementation that satisfies the protocol iterator interface.

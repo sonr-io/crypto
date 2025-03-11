@@ -9,8 +9,8 @@ package frost
 import (
 	"fmt"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
-	"github.com/onsonr/sonr/crypto/internal"
+	"github.com/go-sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/internal"
 )
 
 // Round3Bcast contains the output of FROST signature, i.e., it contains FROST signature (z,c) and the

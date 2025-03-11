@@ -17,9 +17,9 @@ import (
 	"github.com/mr-tron/base58"
 	"golang.org/x/crypto/blake2b"
 
-	"github.com/onsonr/sonr/crypto/core/curves"
-	"github.com/onsonr/sonr/crypto/core/curves/native/pasta/fp"
-	"github.com/onsonr/sonr/crypto/core/curves/native/pasta/fq"
+	"github.com/go-sonr/crypto/core/curves"
+	"github.com/go-sonr/crypto/core/curves/native/pasta/fp"
+	"github.com/go-sonr/crypto/core/curves/native/pasta/fq"
 )
 
 const (

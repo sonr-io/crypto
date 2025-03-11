@@ -9,7 +9,7 @@ package bls_sig
 import (
 	"testing"
 
-	"github.com/onsonr/sonr/crypto/core/curves/native/bls12381"
+	"github.com/go-sonr/crypto/core/curves/native/bls12381"
 )
 
 func generateAugSignatureG2(sk *SecretKey, msg []byte, t *testing.T) *Signature {

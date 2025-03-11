@@ -17,11 +17,11 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/go-sonr/crypto/keys"
 	"github.com/golang-jwt/jwt"
 	"github.com/ipfs/go-cid"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	mh "github.com/multiformats/go-multihash"
-	"github.com/onsonr/sonr/crypto/keys"
 )
 
 // ErrInvalidToken indicates an access token is invalid
