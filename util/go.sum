@@ -1,0 +1,6 @@
+github.com/okx/go-wallet-sdk/util v0.0.2 h1:TV9pbul7+WR8xyj/Zy1yBw7PespsYKojc4d3ro7OdaQ=
+github.com/okx/go-wallet-sdk/util v0.0.2/go.mod h1:myV08jQqyCQl6f9gFKJiWtXHnn06i5KCUwtvjeSXq78=
+golang.org/x/crypto v0.36.0 h1:AnAEvhDddvBdpY+uR+MyHmuZzzNqXSe/GvuDeob5L34=
+golang.org/x/crypto v0.36.0/go.mod h1:Y4J0ReaxCR1IMaabaSMugxJES1EpwhBHhv2bDHklZvc=
+golang.org/x/sys v0.31.0 h1:ioabZlmFYtWhL+TRYpcnNlLwhyxaM9kWTDEmfnprqik=
+golang.org/x/sys v0.31.0/go.mod h1:BJP2sWEmIv4KK5OTEluFJCKSidICx8ciO85XgH3Ak8k=

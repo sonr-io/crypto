@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/okx/go-wallet-sdk/util"
+	"git.sonr.io/pkg/crypto/util"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -51,7 +51,7 @@ type Method struct {
 }
 
 func (m *Method) SigId() []byte {
-	//function foo(uint32 a, int b)    =    "foo(uint32,int256)"
+	// function foo(uint32 a, int b)    =    "foo(uint32,int256)"
 	types := make([]string, len(m.Inputs))
 	for i, v := range m.Inputs {
 		types[i] = v.Type
@@ -82,22 +82,22 @@ func (arg Arguments) Pack(params ...interface{}) []byte {
 	}
 
 	var value []byte
-	var i = 0
+	i := 0
 	for _, v := range arg {
 		p := params[i]
 		i++
 		switch v.Type {
 		case "uint256", "uint128", "uint64", "uint32", "uint", "int256", "int128", "int64", "int32", "int":
-			va := reflect.ValueOf(p).Interface().(*big.Int) //new(big.Int).SetUint64(reflect.ValueOf(p).Uint()) //params[k].(big.Int)
+			va := reflect.ValueOf(p).Interface().(*big.Int) // new(big.Int).SetUint64(reflect.ValueOf(p).Uint()) //params[k].(big.Int)
 			value = append(value, PaddedBigBytes(U256(va), 32)...)
-			//value = append()
+			// value = append()
 		case "string":
-			//packBytesSlice([]byte(reflectValue.String()), reflectValue.Len())
+			// packBytesSlice([]byte(reflectValue.String()), reflectValue.Len())
 			va := new(big.Int).SetBytes([]byte(reflect.ValueOf(p).String())) //
 			value = append(value, PaddedBigBytes(U256(va), 32)...)
 		case "address":
 			addr := reflect.ValueOf(p).String()
-			//addrByte, _ := hex.DecodeString(addr)
+			// addrByte, _ := hex.DecodeString(addr)
 
 			va := new(big.Int).SetBytes(util.RemoveZeroHex(addr))
 			value = append(value, PaddedBigBytes(U256(va), 32)...)
