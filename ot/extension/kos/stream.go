@@ -6,8 +6,8 @@ import (
 
 	"github.com/pkg/errors"
 
-	"github.com/go-sonr/crypto/core/curves"
-	"github.com/go-sonr/crypto/ot/base/simplest"
+	"git.sonr.io/pkg/crypto/core/curves"
+	"git.sonr.io/pkg/crypto/ot/base/simplest"
 )
 
 // ReceiverStreamCOtRun exposes an end-to-end "streaming" version of the cOT process for the receiver.

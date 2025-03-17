@@ -27,8 +27,8 @@ import (
 	"github.com/pkg/errors"
 	"golang.org/x/crypto/sha3"
 
-	"github.com/go-sonr/crypto/core/curves"
-	"github.com/go-sonr/crypto/zkp/schnorr"
+	"git.sonr.io/pkg/crypto/core/curves"
+	"git.sonr.io/pkg/crypto/zkp/schnorr"
 )
 
 const (

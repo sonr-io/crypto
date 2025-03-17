@@ -15,10 +15,10 @@ import (
 	"github.com/gtank/merlin"
 	"github.com/pkg/errors"
 
-	"github.com/go-sonr/crypto/core/curves"
-	"github.com/go-sonr/crypto/ot/base/simplest"
-	"github.com/go-sonr/crypto/ot/extension/kos"
-	"github.com/go-sonr/crypto/zkp/schnorr"
+	"git.sonr.io/pkg/crypto/core/curves"
+	"git.sonr.io/pkg/crypto/ot/base/simplest"
+	"git.sonr.io/pkg/crypto/ot/extension/kos"
+	"git.sonr.io/pkg/crypto/zkp/schnorr"
 )
 
 // AliceOutput is the result of running DKG for Alice. It contains both the public and secret values that are needed

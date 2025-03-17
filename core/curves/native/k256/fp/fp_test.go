@@ -14,8 +14,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/go-sonr/crypto/core/curves/native"
-	"github.com/go-sonr/crypto/internal"
+	"git.sonr.io/pkg/crypto/core/curves/native"
+	"git.sonr.io/pkg/crypto/internal"
 )
 
 func TestFpSetOne(t *testing.T) {

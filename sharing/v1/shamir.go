@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/go-sonr/crypto/core/curves"
+	"git.sonr.io/pkg/crypto/core/curves"
 )
 
 // ShamirShare is the data from splitting a secret

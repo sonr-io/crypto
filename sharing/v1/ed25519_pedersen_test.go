@@ -14,8 +14,8 @@ import (
 	"filippo.io/edwards25519"
 	"github.com/stretchr/testify/require"
 
-	core "github.com/go-sonr/crypto/core/curves"
-	"github.com/go-sonr/crypto/internal"
+	core "git.sonr.io/pkg/crypto/core/curves"
+	"git.sonr.io/pkg/crypto/internal"
 )
 
 var (

@@ -7,7 +7,7 @@ import (
 	"github.com/gtank/merlin"
 	"github.com/stretchr/testify/require"
 
-	"github.com/go-sonr/crypto/core/curves"
+	"git.sonr.io/pkg/crypto/core/curves"
 )
 
 func TestIPPHappyPath(t *testing.T) {

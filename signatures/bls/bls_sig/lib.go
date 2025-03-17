@@ -15,11 +15,11 @@ import (
 
 	"golang.org/x/crypto/hkdf"
 
-	"github.com/go-sonr/crypto/core/curves"
-	"github.com/go-sonr/crypto/core/curves/native"
-	"github.com/go-sonr/crypto/core/curves/native/bls12381"
-	"github.com/go-sonr/crypto/internal"
-	"github.com/go-sonr/crypto/sharing"
+	"git.sonr.io/pkg/crypto/core/curves"
+	"git.sonr.io/pkg/crypto/core/curves/native"
+	"git.sonr.io/pkg/crypto/core/curves/native/bls12381"
+	"git.sonr.io/pkg/crypto/internal"
+	"git.sonr.io/pkg/crypto/sharing"
 )
 
 // Secret key in Fr

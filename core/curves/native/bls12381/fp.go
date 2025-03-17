@@ -6,8 +6,8 @@ import (
 	"io"
 	"math/big"
 
-	"github.com/go-sonr/crypto/core/curves/native"
-	"github.com/go-sonr/crypto/internal"
+	"git.sonr.io/pkg/crypto/core/curves/native"
+	"git.sonr.io/pkg/crypto/internal"
 )
 
 // fp field element mod p

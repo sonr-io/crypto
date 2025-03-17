@@ -14,8 +14,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/go-sonr/crypto/core/curves"
-	v1 "github.com/go-sonr/crypto/sharing/v1"
+	"git.sonr.io/pkg/crypto/core/curves"
+	v1 "git.sonr.io/pkg/crypto/sharing/v1"
 )
 
 const (

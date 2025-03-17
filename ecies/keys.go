@@ -9,7 +9,7 @@ import (
 	eciesgo "github.com/ecies/go/v2"
 	"lukechampine.com/blake3"
 
-	"github.com/go-sonr/crypto/core/curves"
+	"git.sonr.io/pkg/crypto/core/curves"
 )
 
 type PrivateKey = eciesgo.PrivateKey

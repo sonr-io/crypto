@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/go-sonr/crypto/core/curves"
+	"git.sonr.io/pkg/crypto/core/curves"
 )
 
 type FeldmanVerifier struct {

@@ -9,8 +9,8 @@ package mina
 import (
 	"fmt"
 
-	"github.com/go-sonr/crypto/core/curves/native/pasta/fp"
-	"github.com/go-sonr/crypto/core/curves/native/pasta/fq"
+	"git.sonr.io/pkg/crypto/core/curves/native/pasta/fp"
+	"git.sonr.io/pkg/crypto/core/curves/native/pasta/fq"
 )
 
 // Signature is a Mina compatible signature either for payment or delegation

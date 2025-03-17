@@ -15,8 +15,8 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/stretchr/testify/require"
 
-	"github.com/go-sonr/crypto/core"
-	tt "github.com/go-sonr/crypto/internal"
+	"git.sonr.io/pkg/crypto/core"
+	tt "git.sonr.io/pkg/crypto/internal"
 )
 
 func TestIsIdentity(t *testing.T) {

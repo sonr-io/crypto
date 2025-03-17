@@ -1,9 +1,9 @@
 package mpc
 
 import (
-	"github.com/go-sonr/crypto/core/curves"
-	"github.com/go-sonr/crypto/core/protocol"
-	"github.com/go-sonr/crypto/tecdsa/dklsv1"
+	"git.sonr.io/pkg/crypto/core/curves"
+	"git.sonr.io/pkg/crypto/core/protocol"
+	"git.sonr.io/pkg/crypto/tecdsa/dklsv1"
 )
 
 // GenEnclave generates a new MPC keyshare

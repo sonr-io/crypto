@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/go-sonr/crypto/core/curves"
+	"git.sonr.io/pkg/crypto/core/curves"
 )
 
 // dad constructs two polynomials - dA(x) and dD(x)

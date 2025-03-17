@@ -9,8 +9,8 @@ package gennaro
 import (
 	"fmt"
 
-	"github.com/go-sonr/crypto/internal"
-	v1 "github.com/go-sonr/crypto/sharing/v1"
+	"git.sonr.io/pkg/crypto/internal"
+	v1 "git.sonr.io/pkg/crypto/sharing/v1"
 )
 
 // Round3Bcast contains values that will be broadcast to other participants.

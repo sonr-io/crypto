@@ -19,7 +19,7 @@ import (
 	bls12377 "github.com/consensys/gnark-crypto/ecc/bls12-377"
 	"golang.org/x/crypto/sha3"
 
-	"github.com/go-sonr/crypto/core"
+	"git.sonr.io/pkg/crypto/core"
 )
 
 // See 'r' = https://eprint.iacr.org/2018/962.pdf Figure 16

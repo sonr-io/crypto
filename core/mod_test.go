@@ -12,7 +12,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/go-sonr/crypto/internal"
+	"git.sonr.io/pkg/crypto/internal"
 )
 
 var (

@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/go-sonr/crypto/internal"
+	"git.sonr.io/pkg/crypto/internal"
 )
 
 type Fp fiat_pasta_fp_montgomery_domain_field_element

@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	subtle "github.com/go-sonr/crypto/daed"
-	"github.com/go-sonr/crypto/subtle/random"
+	subtle "git.sonr.io/pkg/crypto/daed"
+	"git.sonr.io/pkg/crypto/subtle/random"
 )
 
 type testData struct {

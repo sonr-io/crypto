@@ -18,7 +18,7 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"golang.org/x/crypto/hkdf"
 
-	"github.com/go-sonr/crypto/internal"
+	"git.sonr.io/pkg/crypto/internal"
 )
 
 type HashField struct {

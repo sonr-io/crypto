@@ -12,8 +12,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/go-sonr/crypto/core/curves/native/pasta/fp"
-	"github.com/go-sonr/crypto/core/curves/native/pasta/fq"
+	"git.sonr.io/pkg/crypto/core/curves/native/pasta/fp"
+	"git.sonr.io/pkg/crypto/core/curves/native/pasta/fq"
 )
 
 func TestPoseidonHash(t *testing.T) {

@@ -10,9 +10,9 @@ package frost
 import (
 	"fmt"
 
-	"github.com/go-sonr/crypto/core/curves"
-	"github.com/go-sonr/crypto/dkg/frost"
-	"github.com/go-sonr/crypto/internal"
+	"git.sonr.io/pkg/crypto/core/curves"
+	"git.sonr.io/pkg/crypto/dkg/frost"
+	"git.sonr.io/pkg/crypto/internal"
 )
 
 // Signer is a tSchnorr player performing the signing operation.

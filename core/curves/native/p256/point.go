@@ -3,9 +3,9 @@ package p256
 import (
 	"sync"
 
-	"github.com/go-sonr/crypto/core/curves/native"
-	"github.com/go-sonr/crypto/core/curves/native/p256/fp"
-	"github.com/go-sonr/crypto/internal"
+	"git.sonr.io/pkg/crypto/core/curves/native"
+	"git.sonr.io/pkg/crypto/core/curves/native/p256/fp"
+	"git.sonr.io/pkg/crypto/internal"
 )
 
 var (
