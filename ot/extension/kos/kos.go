@@ -17,8 +17,8 @@ import (
 
 	"golang.org/x/crypto/sha3"
 
-	"git.sonr.io/pkg/crypto/core/curves"
-	"git.sonr.io/pkg/crypto/ot/base/simplest"
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/ot/base/simplest"
 	"github.com/pkg/errors"
 )
 

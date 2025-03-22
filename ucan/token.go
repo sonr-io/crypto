@@ -17,7 +17,7 @@ import (
 	"fmt"
 	"time"
 
-	"git.sonr.io/pkg/crypto/keys"
+	"github.com/sonr-io/crypto/keys"
 	"github.com/golang-jwt/jwt"
 	"github.com/ipfs/go-cid"
 	"github.com/libp2p/go-libp2p/core/crypto"

@@ -6,8 +6,8 @@ import (
 
 	"github.com/pkg/errors"
 
-	"git.sonr.io/pkg/crypto/core/curves"
-	"git.sonr.io/pkg/crypto/zkp/schnorr"
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/zkp/schnorr"
 )
 
 // ReceiverStreamOTRun exposes the entire seed OT process for the receiver in "stream mode" to the user.

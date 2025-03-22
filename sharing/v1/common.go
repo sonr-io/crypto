@@ -7,7 +7,7 @@
 package v1
 
 import (
-	kryptology "git.sonr.io/pkg/crypto/core/curves"
+	kryptology "github.com/sonr-io/crypto/core/curves"
 )
 
 // ShareVerifier is used to verify secret shares from Feldman or Pedersen VSS

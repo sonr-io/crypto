@@ -12,9 +12,9 @@ import (
 	"fmt"
 	"math/big"
 
-	"git.sonr.io/pkg/crypto/core"
+	"github.com/sonr-io/crypto/core"
 
-	"git.sonr.io/pkg/crypto/internal"
+	"github.com/sonr-io/crypto/internal"
 	"github.com/dustinxie/ecc"
 )
 

@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"strings"
 
-	"git.sonr.io/pkg/crypto/util"
+	"github.com/sonr-io/crypto/util"
 	"golang.org/x/crypto/sha3"
 )
 

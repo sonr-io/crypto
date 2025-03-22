@@ -1,10 +1,10 @@
 package mpc
 
 import (
-	"git.sonr.io/pkg/crypto/core/curves"
-	"git.sonr.io/pkg/crypto/core/protocol"
-	"git.sonr.io/pkg/crypto/keys"
-	"git.sonr.io/pkg/crypto/tecdsa/dklsv1/dkg"
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/core/protocol"
+	"github.com/sonr-io/crypto/keys"
+	"github.com/sonr-io/crypto/tecdsa/dklsv1/dkg"
 )
 
 // ╭───────────────────────────────────────────────────────────╮

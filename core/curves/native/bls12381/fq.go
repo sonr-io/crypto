@@ -5,7 +5,7 @@ import (
 	"math/big"
 	"sync"
 
-	"git.sonr.io/pkg/crypto/core/curves/native"
+	"github.com/sonr-io/crypto/core/curves/native"
 )
 
 type Fq [native.FieldLimbs]uint64

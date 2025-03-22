@@ -12,7 +12,7 @@ import (
 	"math/rand"
 	"testing"
 
-	"git.sonr.io/pkg/crypto/core/curves/native/bls12381"
+	"github.com/sonr-io/crypto/core/curves/native/bls12381"
 )
 
 const numAggregateG2 = 10

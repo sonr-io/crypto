@@ -7,13 +7,13 @@ Sonr's advanced cryptography library, forked from Coinbase's Kryptology
 Use the latest version of this library:
 
 ```
-go get git.sonr.io/pkg/crypto
+go get github.com/sonr-io/crypto
 ```
 
 Pin a specific version of this library:
 
 ```
-go get git.sonr.io/pkg/crypto@v0.0.2
+go get github.com/sonr-io/crypto@v0.0.2
 ```
 
 ## Documentation
@@ -23,7 +23,7 @@ Documentation can be found at the Sonr developer portal.
 To access the documentation of the local version, run `godoc -http=:6060` and open
 the following URL in your browser:
 
-http://localhost:6060/pkg/git.sonr.io/pkg/crypto/
+http://localhost:6060/pkg/github.com/sonr-io/crypto/
 
 ## Developer Setup
 
@@ -36,7 +36,7 @@ export GONOPROXY=git.sonr.io
 export GONOSUMDB=git.sonr.io
 
 # Clone and build
-git clone https://git.sonr.io/pkg/crypto.git && cd crypto && make
+git clone https://github.com/sonr-io/crypto.git && cd crypto && make
 ```
 
 ## Components

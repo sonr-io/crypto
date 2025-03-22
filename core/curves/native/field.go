@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"math/big"
 
-	"git.sonr.io/pkg/crypto/internal"
+	"github.com/sonr-io/crypto/internal"
 )
 
 // FieldLimbs is the number of limbs needed to represent this field

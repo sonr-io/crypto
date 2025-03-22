@@ -16,7 +16,7 @@ import (
 	"math/big"
 	"testing"
 
-	"git.sonr.io/pkg/crypto/core"
+	"github.com/sonr-io/crypto/core"
 )
 
 func BenchmarkP256(b *testing.B) {

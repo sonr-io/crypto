@@ -6,9 +6,9 @@ import (
 
 	"github.com/pkg/errors"
 
-	"git.sonr.io/pkg/crypto/core/curves"
-	"git.sonr.io/pkg/crypto/core/protocol"
-	"git.sonr.io/pkg/crypto/tecdsa/dklsv1/sign"
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/core/protocol"
+	"github.com/sonr-io/crypto/tecdsa/dklsv1/sign"
 )
 
 func newSignProtocolMessage(payload []byte, round string, version uint) *protocol.Message {

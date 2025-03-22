@@ -14,9 +14,9 @@ import (
 	"github.com/gtank/merlin"
 	"golang.org/x/crypto/sha3"
 
-	"git.sonr.io/pkg/crypto/core/curves"
-	"git.sonr.io/pkg/crypto/internal"
-	"git.sonr.io/pkg/crypto/signatures/common"
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/internal"
+	"github.com/sonr-io/crypto/signatures/common"
 )
 
 // BlindSignatureContext contains the data used for computing

@@ -11,9 +11,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"git.sonr.io/pkg/crypto/core/curves"
-	dkg "git.sonr.io/pkg/crypto/dkg/frost"
-	"git.sonr.io/pkg/crypto/sharing"
+	"github.com/sonr-io/crypto/core/curves"
+	dkg "github.com/sonr-io/crypto/dkg/frost"
+	"github.com/sonr-io/crypto/sharing"
 )
 
 var (

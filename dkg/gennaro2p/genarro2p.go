@@ -15,9 +15,9 @@ import (
 
 	"github.com/pkg/errors"
 
-	"git.sonr.io/pkg/crypto/core/curves"
-	"git.sonr.io/pkg/crypto/dkg/gennaro"
-	v1 "git.sonr.io/pkg/crypto/sharing/v1"
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/dkg/gennaro"
+	v1 "github.com/sonr-io/crypto/sharing/v1"
 )
 
 const threshold = 2

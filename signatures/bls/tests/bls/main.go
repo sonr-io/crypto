@@ -14,7 +14,7 @@ import (
 	"fmt"
 	"os"
 
-	bls "git.sonr.io/pkg/crypto/signatures/bls/bls_sig"
+	bls "github.com/sonr-io/crypto/signatures/bls/bls_sig"
 )
 
 type signOp struct {

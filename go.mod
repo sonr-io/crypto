@@ -1,4 +1,4 @@
-module git.sonr.io/pkg/crypto
+module github.com/sonr-io/crypto
 
 go 1.24.1
 

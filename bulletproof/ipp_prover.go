@@ -11,7 +11,7 @@ import (
 	"github.com/gtank/merlin"
 	"github.com/pkg/errors"
 
-	"git.sonr.io/pkg/crypto/core/curves"
+	"github.com/sonr-io/crypto/core/curves"
 )
 
 // InnerProductProver is the struct used to create InnerProductProofs

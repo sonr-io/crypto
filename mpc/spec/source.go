@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"git.sonr.io/pkg/crypto/keys"
-	"git.sonr.io/pkg/crypto/ucan"
+	"github.com/sonr-io/crypto/keys"
+	"github.com/sonr-io/crypto/ucan"
 	"lukechampine.com/blake3"
 )
 

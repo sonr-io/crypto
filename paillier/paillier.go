@@ -27,8 +27,8 @@ import (
 
 	"github.com/pkg/errors"
 
-	"git.sonr.io/pkg/crypto/core"
-	"git.sonr.io/pkg/crypto/internal"
+	"github.com/sonr-io/crypto/core"
+	"github.com/sonr-io/crypto/internal"
 )
 
 // PaillierPrimeBits is the number of bits used to generate Paillier Safe Primes.

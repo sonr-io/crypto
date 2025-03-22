@@ -16,7 +16,7 @@ import (
 	"golang.org/x/crypto/hkdf"
 	"golang.org/x/crypto/sha3"
 
-	"git.sonr.io/pkg/crypto/core/curves"
+	"github.com/sonr-io/crypto/core/curves"
 )
 
 // SecretKey is a BBS+ signing key

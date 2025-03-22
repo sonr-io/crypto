@@ -13,8 +13,8 @@ import (
 
 	"github.com/pkg/errors"
 
-	"git.sonr.io/pkg/crypto/core/curves"
-	"git.sonr.io/pkg/crypto/internal"
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/internal"
 )
 
 // Round2Bcast contains values that will be broadcast to other signers after completion of round 2.

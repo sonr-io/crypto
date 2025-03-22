@@ -15,11 +15,11 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 
-	"git.sonr.io/pkg/crypto/core/curves/native"
-	secp256k1 "git.sonr.io/pkg/crypto/core/curves/native/k256"
-	"git.sonr.io/pkg/crypto/core/curves/native/k256/fp"
-	"git.sonr.io/pkg/crypto/core/curves/native/k256/fq"
-	"git.sonr.io/pkg/crypto/internal"
+	"github.com/sonr-io/crypto/core/curves/native"
+	secp256k1 "github.com/sonr-io/crypto/core/curves/native/k256"
+	"github.com/sonr-io/crypto/core/curves/native/k256/fp"
+	"github.com/sonr-io/crypto/core/curves/native/k256/fq"
+	"github.com/sonr-io/crypto/internal"
 )
 
 var (

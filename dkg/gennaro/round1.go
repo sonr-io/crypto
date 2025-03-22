@@ -10,9 +10,9 @@ import (
 	"fmt"
 	"math/big"
 
-	"git.sonr.io/pkg/crypto/core"
-	"git.sonr.io/pkg/crypto/internal"
-	v1 "git.sonr.io/pkg/crypto/sharing/v1"
+	"github.com/sonr-io/crypto/core"
+	"github.com/sonr-io/crypto/internal"
+	v1 "github.com/sonr-io/crypto/sharing/v1"
 )
 
 // Round1Bcast are the values that are broadcast to all other participants

@@ -12,8 +12,8 @@ import (
 
 	"github.com/gtank/merlin"
 
-	"git.sonr.io/pkg/crypto/core/curves"
-	"git.sonr.io/pkg/crypto/signatures/common"
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/signatures/common"
 )
 
 // PokSignature a.k.a. Proof of Knowledge of a Signature

@@ -11,7 +11,7 @@ import (
 	"errors"
 	"fmt"
 
-	"git.sonr.io/pkg/crypto/core/curves"
+	"github.com/sonr-io/crypto/core/curves"
 )
 
 // Signature is a BBS+ signature

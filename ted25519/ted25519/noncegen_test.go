@@ -12,8 +12,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"git.sonr.io/pkg/crypto/core/curves"
-	v1 "git.sonr.io/pkg/crypto/sharing/v1"
+	"github.com/sonr-io/crypto/core/curves"
+	v1 "github.com/sonr-io/crypto/sharing/v1"
 )
 
 func TestNonceShareFromBytes(t *testing.T) {

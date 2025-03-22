@@ -13,8 +13,8 @@ import (
 
 	ed "filippo.io/edwards25519"
 
-	"git.sonr.io/pkg/crypto/core/curves"
-	"git.sonr.io/pkg/crypto/internal"
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/internal"
 )
 
 var (

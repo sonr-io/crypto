@@ -3,7 +3,7 @@
 package dklsv1
 
 import (
-	"git.sonr.io/pkg/crypto/core/protocol"
+	"github.com/sonr-io/crypto/core/protocol"
 )
 
 // Basic protocol interface implementation that calls the next step func in a pre-defined list

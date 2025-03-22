@@ -7,8 +7,8 @@ import (
 
 	"github.com/pkg/errors"
 
-	"git.sonr.io/pkg/crypto/core/curves/native"
-	"git.sonr.io/pkg/crypto/internal"
+	"github.com/sonr-io/crypto/core/curves/native"
+	"github.com/sonr-io/crypto/internal"
 )
 
 var (

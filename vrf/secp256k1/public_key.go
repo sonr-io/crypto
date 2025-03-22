@@ -10,7 +10,7 @@ import (
 	"database/sql/driver"
 	"fmt"
 
-	"git.sonr.io/pkg/crypto/vrf/utils"
+	"github.com/sonr-io/crypto/vrf/utils"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"go.dedis.ch/kyber/v3"

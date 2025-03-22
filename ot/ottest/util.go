@@ -5,8 +5,8 @@ package ottest
 import (
 	"github.com/pkg/errors"
 
-	"git.sonr.io/pkg/crypto/core/curves"
-	"git.sonr.io/pkg/crypto/ot/base/simplest"
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/ot/base/simplest"
 )
 
 // RunSimplestOT is a utility function used _only_ during various tests.

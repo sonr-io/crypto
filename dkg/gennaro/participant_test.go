@@ -13,8 +13,8 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/stretchr/testify/require"
 
-	"git.sonr.io/pkg/crypto/core/curves"
-	"git.sonr.io/pkg/crypto/internal"
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/internal"
 )
 
 var testGenerator, _ = curves.NewScalarBaseMult(btcec.S256(), big.NewInt(3333))
