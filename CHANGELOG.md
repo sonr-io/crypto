@@ -1,3 +1,11 @@
+## v0.4.0 (2025-03-22)
+
+### Feat
+
+- introduce UCAN types with protobuf definitions
+
+## v0.3.0 (2025-03-22)
+
 ## v0.2.0 (2025-03-22)
 
 ### Feat
