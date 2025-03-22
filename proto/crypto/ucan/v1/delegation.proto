@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package crypto.ucan.v1;
+
+import "crypto/ucan/v1/policy.proto";
+
+option go_package = "github.com/sonr-io/crypto/ucan/types/v1;ucanv1";
+
+// DelegationPayload represents a UCAN delegation of authority
+message DelegationPayload {
+  // Issuer DID (sender) - the entity delegating authority
+  string issuer = 1;
+  
+  // Audience DID (receiver) - the entity receiving authority
+  string audience = 2;
+  
+  // Subject DID - the principal that the chain is about
+  // If null, this is a "powerline" delegation
+  string subject = 3;
+  
+  // Command to be invoked - path format (e.g., "/crud/read")
+  string command = 4;
+  
+  // Policy constraints on eventual invocation arguments
+  repeated PolicyStatement policy = 5;
+  
+  // Nonce to ensure uniqueness
+  bytes nonce = 6;
+  
+  // Optional metadata - arbitrary signed data that isn't delegated authority
+  map<string, bytes> meta = 7;
+  
+  // Not before - UTC Unix timestamp in seconds
+  // If omitted, valid from Unix epoch
+  int64 not_before = 8;
+  
+  // Expiration - UTC Unix timestamp in seconds
+  // If null, token never expires
+  int64 expiration = 9;
+  
+  // Proofs - chain of authority leading to this delegation
+  // Using string CIDs instead of Proof objects to avoid import cycles
+  repeated string proof_cids = 10;
+}

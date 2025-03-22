@@ -1,0 +1,135 @@
+syntax = "proto3";
+
+package crypto.ucan.v1;
+
+import "google/protobuf/struct.proto";
+
+option go_package = "github.com/sonr-io/crypto/ucan/types/v1;ucanv1";
+
+// PolicyStatement represents a constraint on invocation arguments
+message PolicyStatement {
+  oneof statement {
+    // Comparison statement
+    ComparisonStatement comparison = 1;
+    
+    // Connective statement (and, or)
+    ConnectiveStatement connective = 2;
+    
+    // Negation statement (not)
+    NegationStatement negation = 3;
+    
+    // Quantifier statement (all, any)
+    QuantifierStatement quantifier = 4;
+    
+    // Pattern matching statement
+    PatternStatement pattern = 5;
+  }
+}
+
+// ComparisonStatement represents comparison operations
+message ComparisonStatement {
+  // Type of comparison
+  ComparisonOperator operator = 1;
+  
+  // Selector for the value to compare (jq-like path)
+  string selector = 2;
+  
+  // Value to compare against
+  google.protobuf.Value value = 3;
+}
+
+// ComparisonOperator represents available comparison operations
+enum ComparisonOperator {
+  // Unknown operator
+  COMPARISON_OPERATOR_UNSPECIFIED = 0;
+  
+  // Equal (==)
+  COMPARISON_OPERATOR_EQUAL = 1;
+  
+  // Not equal (!=)
+  COMPARISON_OPERATOR_NOT_EQUAL = 2;
+  
+  // Greater than (>)
+  COMPARISON_OPERATOR_GREATER_THAN = 3;
+  
+  // Greater than or equal (>=)
+  COMPARISON_OPERATOR_GREATER_THAN_OR_EQUAL = 4;
+  
+  // Less than (<)
+  COMPARISON_OPERATOR_LESS_THAN = 5;
+  
+  // Less than or equal (<=)
+  COMPARISON_OPERATOR_LESS_THAN_OR_EQUAL = 6;
+}
+
+// ConnectiveStatement represents logical connectives
+message ConnectiveStatement {
+  // Type of connective
+  ConnectiveOperator operator = 1;
+  
+  // Statements to connect
+  repeated PolicyStatement statements = 2;
+}
+
+// ConnectiveOperator represents available logical connectives
+enum ConnectiveOperator {
+  // Unknown operator
+  CONNECTIVE_OPERATOR_UNSPECIFIED = 0;
+  
+  // Logical AND
+  CONNECTIVE_OPERATOR_AND = 1;
+  
+  // Logical OR
+  CONNECTIVE_OPERATOR_OR = 2;
+}
+
+// NegationStatement represents logical negation
+message NegationStatement {
+  // Statement to negate
+  PolicyStatement statement = 1;
+}
+
+// QuantifierStatement represents quantification over collections
+message QuantifierStatement {
+  // Type of quantifier
+  QuantifierOperator operator = 1;
+  
+  // Selector for the collection to quantify over
+  string selector = 2;
+  
+  // Statement to apply to each item
+  PolicyStatement statement = 3;
+}
+
+// QuantifierOperator represents available quantifiers
+enum QuantifierOperator {
+  // Unknown operator
+  QUANTIFIER_OPERATOR_UNSPECIFIED = 0;
+  
+  // Universal quantifier (all)
+  QUANTIFIER_OPERATOR_ALL = 1;
+  
+  // Existential quantifier (any)
+  QUANTIFIER_OPERATOR_ANY = 2;
+}
+
+// PatternStatement represents pattern matching operations
+message PatternStatement {
+  // Type of pattern matching
+  PatternOperator operator = 1;
+  
+  // Selector for the value to match
+  string selector = 2;
+  
+  // Pattern to match against
+  string pattern = 3;
+}
+
+// PatternOperator represents available pattern matching operations
+enum PatternOperator {
+  // Unknown operator
+  PATTERN_OPERATOR_UNSPECIFIED = 0;
+  
+  // Glob pattern matching (like)
+  PATTERN_OPERATOR_LIKE = 1;
+}

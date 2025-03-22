@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package crypto.ucan.v1;
+
+option go_package = "github.com/sonr-io/crypto/ucan/types/v1;ucanv1";
+
+// Token represents a UCAN (User Controlled Authorization Network) token
+// This is the envelope structure that contains the signature and payload
+message Token {
+  // Signature is the raw signature bytes of the payload
+  bytes signature = 1;
+  
+  // Payload contains the token content and header
+  TokenPayload payload = 2;
+}
+
+// TokenPayload represents the content of a UCAN token
+message TokenPayload {
+  // Header contains information about the token format and version
+  TokenHeader header = 1;
+  
+  // UCAN payload content - using string references to avoid import cycles
+  oneof content {
+    // Delegation represents a delegation of authority
+    bytes delegation = 2;
+    
+    // Invocation represents a request to execute a capability
+    bytes invocation = 3;
+    
+    // Receipt represents a response to an invocation
+    bytes receipt = 4;
+  }
+}
+
+// TokenHeader contains metadata about the token format
+message TokenHeader {
+  // Version of the UCAN specification (e.g., "1.0.0-rc.1")
+  string version = 1;
+  
+  // Algorithm used for the signature (e.g., "Ed25519", "P-256", "secp256k1")
+  string algorithm = 2;
+}
+
+// Proof is a reference to another UCAN token that proves authority
+// It can be either a CID or the entire token
+message Proof {
+  oneof proof {
+    // CID (Content Identifier) of a UCAN token
+    string cid = 1;
+    
+    // Embedded UCAN token
+    Token token = 2;
+  }
+}

@@ -1,0 +1,88 @@
+syntax = "proto3";
+
+package crypto.ucan.v1;
+
+import "crypto/ucan/v1/policy.proto";
+
+option go_package = "github.com/sonr-io/crypto/ucan/types/v1;ucanv1";
+
+// Resource represents a resource that capabilities can be applied to
+// Moved from delegation.proto to avoid import cycles
+message Resource {
+  // Resource type (e.g., "account", "vault", "service")
+  string kind = 1;
+  
+  // Resource identifier
+  string id = 2;
+  
+  // Optional additional properties specific to this resource
+  map<string, bytes> properties = 3;
+}
+
+// Capability represents a possible action on a resource
+message Capability {
+  // Name of the capability (e.g., "sign", "transfer", "link")
+  string name = 1;
+  
+  // Optional parent capability (for hierarchical capabilities)
+  string parent = 2;
+  
+  // Description of what this capability allows
+  string description = 3;
+  
+  // Command path this capability maps to (e.g., "/vault/sign")
+  string command = 4;
+}
+
+// CapabilityAttenuation represents a capability granted to a resource
+message CapabilityAttenuation {
+  // The resource this capability applies to
+  Resource resource = 1;
+  
+  // The granted capability
+  Capability capability = 2;
+  
+  // Optional policy constraints on this capability
+  repeated PolicyStatement constraints = 3;
+}
+
+// CapabilityHierarchy defines a tree of related capabilities
+message CapabilityHierarchy {
+  // Type of capability hierarchy (e.g., "vault", "account", "service")
+  string type = 1;
+  
+  // Root capability (most powerful, typically "/")
+  Capability root = 2;
+  
+  // All capabilities in this hierarchy
+  repeated Capability capabilities = 3;
+}
+
+// Module-specific capability hierarchies
+
+// VaultCapabilities defines the capability hierarchy for the DWN module
+message VaultCapabilities {
+  // All vault capabilities
+  repeated Capability capabilities = 1;
+  
+  // Default attenuations for vault resources
+  repeated CapabilityAttenuation default_attenuations = 2;
+}
+
+// AccountCapabilities defines the capability hierarchy for the DID module
+message AccountCapabilities {
+  // All account capabilities
+  repeated Capability capabilities = 1;
+  
+  // Default attenuations for account resources
+  repeated CapabilityAttenuation default_attenuations = 2;
+}
+
+// ServiceCapabilities defines the capability hierarchy for the SVC module
+message ServiceCapabilities {
+  // All service capabilities
+  repeated Capability capabilities = 1;
+  
+  // Default attenuations for service resources
+  repeated CapabilityAttenuation default_attenuations = 2;
+}

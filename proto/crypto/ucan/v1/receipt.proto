@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package crypto.ucan.v1;
+
+import "crypto/ucan/v1/invocation.proto";
+import "google/protobuf/any.proto";
+
+option go_package = "github.com/sonr-io/crypto/ucan/types/v1;ucanv1";
+
+// ReceiptPayload represents a response to a UCAN invocation
+message ReceiptPayload {
+  // Issuer DID (sender) - the entity that executed the invocation
+  string issuer = 1;
+  
+  // Audience DID (receiver) - typically the original invoker
+  string audience = 2;
+  
+  // Invocation CID - the CID of the invocation this receipt responds to
+  string invocation = 3;
+  
+  // Result status
+  ReceiptStatus status = 4;
+  
+  // Optional result data 
+  google.protobuf.Any result = 5;
+  
+  // Optional error information if status is ERROR
+  ErrorInfo error = 6;
+  
+  // Optional next tasks to execute
+  repeated Task next = 7;
+  
+  // Issued at - UTC Unix timestamp in seconds
+  int64 issued_at = 8;
+  
+  // Optional metadata
+  map<string, bytes> meta = 9;
+}
+
+// ReceiptStatus represents the result of an invocation
+enum ReceiptStatus {
+  // Unknown status
+  RECEIPT_STATUS_UNSPECIFIED = 0;
+  
+  // Invocation was successful
+  RECEIPT_STATUS_SUCCESS = 1;
+  
+  // Invocation failed
+  RECEIPT_STATUS_ERROR = 2;
+  
+  // Invocation is being processed
+  RECEIPT_STATUS_PROCESSING = 3;
+  
+  // Invocation was accepted but not yet processed
+  RECEIPT_STATUS_ACCEPTED = 4;
+  
+  // Invocation was rejected
+  RECEIPT_STATUS_REJECTED = 5;
+}
+
+// ErrorInfo provides details about an error
+message ErrorInfo {
+  // Error code
+  string code = 1;
+  
+  // Error message
+  string message = 2;
+  
+  // Optional detailed error information
+  map<string, string> details = 3;
+}

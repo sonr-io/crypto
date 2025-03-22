@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+package crypto.ucan.v1;
+
+import "google/protobuf/any.proto";
+
+option go_package = "github.com/sonr-io/crypto/ucan/types/v1;ucanv1";
+
+// InvocationPayload represents a UCAN invocation to execute capabilities
+message InvocationPayload {
+  // Issuer DID (sender) - the entity requesting execution
+  string issuer = 1;
+  
+  // Subject DID - the principal being invoked
+  string subject = 2;
+  
+  // Audience DID (receiver) - the entity that should execute (optional)
+  // If not specified, assumed to be the same as subject
+  string audience = 3;
+  
+  // Command to invoke - path format (e.g., "/vault/sign")
+  string command = 4;
+  
+  // Arguments for the command
+  map<string, google.protobuf.Any> arguments = 5;
+  
+  // Proofs - delegations that prove the invoker's authority
+  // Using string CIDs instead of Proof objects to avoid import cycles
+  repeated string proof_cids = 6;
+  
+  // Optional metadata - arbitrary information
+  map<string, bytes> meta = 7;
+  
+  // Nonce to ensure uniqueness
+  bytes nonce = 8;
+  
+  // Expiration - UTC Unix timestamp in seconds
+  int64 expiration = 9;
+  
+  // Issued at - UTC Unix timestamp in seconds
+  int64 issued_at = 10;
+  
+  // Cause - CID of the receipt that enqueued this task (optional)
+  string cause = 11;
+}
+
+// Task represents a specific unit of work to be performed
+message Task {
+  // Subject being invoked
+  string subject = 1;
+  
+  // Command to invoke
+  string command = 2;
+  
+  // Arguments for the command
+  map<string, google.protobuf.Any> arguments = 3;
+  
+  // Nonce to ensure uniqueness
+  bytes nonce = 4;
+}
