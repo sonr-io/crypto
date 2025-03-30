@@ -51,8 +51,9 @@ require (
 )
 
 require (
-	github.com/btcsuite/btcd v0.22.3
 	github.com/btcsuite/btcutil v1.0.3-0.20201208143702-a53e38424cce
 	github.com/multiformats/go-multicodec v0.9.0
 	github.com/okx/go-wallet-sdk/util v0.0.1
 )
+
+require github.com/btcsuite/btcd/chaincfg/chainhash v1.1.0 // indirect
