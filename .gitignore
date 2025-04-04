@@ -1,3 +1,5 @@
+*.aiderscript
+
 bin
 .DS_Store
 tmp
