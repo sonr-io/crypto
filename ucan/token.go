@@ -17,11 +17,11 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/sonr-io/crypto/keys"
 	"github.com/golang-jwt/jwt"
 	"github.com/ipfs/go-cid"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	mh "github.com/multiformats/go-multihash"
+	"github.com/sonr-io/crypto/keys"
 )
 
 // ErrInvalidToken indicates an access token is invalid
@@ -94,7 +94,7 @@ type Claims struct {
 // Fact is self-evident statement
 type Fact struct {
 	cidString string
-	value     map[string]interface{}
+	value     map[string]any
 }
 
 // func (fct *Fact) MarshalJSON() (p[])
@@ -127,8 +127,8 @@ type pkSource struct {
 	issuerDID     string
 	signingMethod jwt.SigningMethod
 
-	verifyKey interface{} // one of: *rsa.PublicKey, *edsa.PublicKey
-	signKey   interface{} // one of: *rsa.PrivateKey,
+	verifyKey any // one of: *rsa.PublicKey, *edsa.PublicKey
+	signKey   any // one of: *rsa.PrivateKey,
 }
 
 // assert pkSource implements tokens at compile time
@@ -145,8 +145,8 @@ func NewPrivKeySource(privKey crypto.PrivKey) (Source, error) {
 	var (
 		methodStr = ""
 		keyType   = privKey.Type()
-		signKey   interface{}
-		verifyKey interface{}
+		signKey   any
+		verifyKey any
 	)
 
 	switch keyType {
@@ -157,12 +157,12 @@ func NewPrivKeySource(privKey crypto.PrivKey) (Source, error) {
 		if err != nil {
 			return nil, err
 		}
-		rawPubBytes, err := privKey.GetPublic().Raw()
-		if err != nil {
+		rawPubBytes, errb := privKey.GetPublic().Raw()
+		if errb != nil {
 			return nil, fmt.Errorf("getting raw public key bytes: %w", err)
 		}
-		verifyKeyiface, err := x509.ParsePKIXPublicKey(rawPubBytes)
-		if err != nil {
+		verifyKeyiface, errc := x509.ParsePKIXPublicKey(rawPubBytes)
+		if errc != nil {
 			return nil, fmt.Errorf("parsing public key bytes: %w", err)
 		}
 		var ok bool
@@ -173,8 +173,8 @@ func NewPrivKeySource(privKey crypto.PrivKey) (Source, error) {
 	case crypto.Ed25519:
 		methodStr = "EdDSA"
 		signKey = ed25519.PrivateKey(rawPrivBytes)
-		rawPubBytes, err := privKey.GetPublic().Raw()
-		if err != nil {
+		rawPubBytes, errd := privKey.GetPublic().Raw()
+		if errd != nil {
 			return nil, fmt.Errorf("getting raw public key bytes: %w", err)
 		}
 		verifyKey = ed25519.PublicKey(rawPubBytes)
@@ -304,7 +304,7 @@ func (p *TokenParser) ParseAndVerify(ctx context.Context, raw string) (*Token, e
 	return p.parseAndVerify(ctx, raw, nil)
 }
 
-func (p *TokenParser) parseAndVerify(ctx context.Context, raw string, child *Token) (*Token, error) {
+func (p *TokenParser) parseAndVerify(ctx context.Context, raw string, _ *Token) (*Token, error) {
 	tok, err := jwt.Parse(raw, p.matchVerifyKeyFunc(ctx))
 	if err != nil {
 		return nil, fmt.Errorf("parsing UCAN: %w", err)
@@ -340,9 +340,9 @@ func (p *TokenParser) parseAndVerify(ctx context.Context, raw string, child *Tok
 	}
 
 	var att Attenuations
-	if acci, ok := mc[AttKey].([]interface{}); ok {
+	if acci, ok := mc[AttKey].([]any); ok {
 		for i, a := range acci {
-			if mapv, ok := a.(map[string]interface{}); ok {
+			if mapv, ok := a.(map[string]any); ok {
 				a, err := p.ap(mapv)
 				if err != nil {
 					return nil, err
@@ -357,7 +357,7 @@ func (p *TokenParser) parseAndVerify(ctx context.Context, raw string, child *Tok
 	}
 
 	var prf []Proof
-	if prfi, ok := mc[PrfKey].([]interface{}); ok {
+	if prfi, ok := mc[PrfKey].([]any); ok {
 		for i, a := range prfi {
 			if pStr, ok := a.(string); ok {
 				prf = append(prf, Proof(pStr))
@@ -378,8 +378,8 @@ func (p *TokenParser) parseAndVerify(ctx context.Context, raw string, child *Tok
 	}, nil
 }
 
-func (p *TokenParser) matchVerifyKeyFunc(ctx context.Context) func(tok *jwt.Token) (interface{}, error) {
-	return func(tok *jwt.Token) (interface{}, error) {
+func (p *TokenParser) matchVerifyKeyFunc(ctx context.Context) func(tok *jwt.Token) (any, error) {
+	return func(tok *jwt.Token) (any, error) {
 		mc, ok := tok.Claims.(jwt.MapClaims)
 		if !ok {
 			return nil, fmt.Errorf("parser fail")

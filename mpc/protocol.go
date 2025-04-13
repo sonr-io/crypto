@@ -40,7 +40,7 @@ func ExecuteSigning(signFuncVal SignFunc, signFuncUser SignFunc) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
-	sig, err := serializeSignature(s)
+	sig, err := SerializeSignature(s)
 	if err != nil {
 		return nil, err
 	}

@@ -39,7 +39,7 @@ LOOP:
 // AttenuationConstructorFunc is a function that creates an attenuation from a map
 // Users of this package provide an Attenuation Constructor to the parser to
 // bind attenuation logic to a UCAN
-type AttenuationConstructorFunc func(v map[string]interface{}) (Attenuation, error)
+type AttenuationConstructorFunc func(v map[string]any) (Attenuation, error)
 
 // Attenuation is a capability on a resource
 type Attenuation struct {
@@ -59,7 +59,7 @@ func (a Attenuation) Contains(b Attenuation) bool {
 
 // MarshalJSON implements the json.Marshaller interface
 func (a Attenuation) MarshalJSON() ([]byte, error) {
-	return json.Marshal(map[string]interface{}{
+	return json.Marshal(map[string]any{
 		a.Rsc.Type(): a.Rsc.Value(),
 		CapKey:       a.Cap.String(),
 	})
@@ -132,10 +132,7 @@ func (nc NestedCapabilities) Contains(cap Capability) bool {
 	str := cap.String()
 	for i, c := range *nc.hierarchy {
 		if c == str {
-			if i >= nc.idx {
-				return true
-			}
-			return false
+			return i >= nc.idx
 		}
 	}
 	return false

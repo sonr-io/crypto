@@ -32,7 +32,7 @@ func hashKey(key []byte) []byte {
 	return hash.Sum(nil)[:32] // Use first 32 bytes of hash
 }
 
-func decryptKeyshare(msg []byte, key []byte, nonce []byte) ([]byte, error) {
+func DecryptKeyshare(msg []byte, key []byte, nonce []byte) ([]byte, error) {
 	hashedKey := hashKey(key)
 	block, err := aes.NewCipher(hashedKey)
 	if err != nil {
@@ -49,7 +49,7 @@ func decryptKeyshare(msg []byte, key []byte, nonce []byte) ([]byte, error) {
 	return plaintext, nil
 }
 
-func encryptKeyshare(msg Message, key []byte, nonce []byte) ([]byte, error) {
+func EncryptKeyshare(msg Message, key []byte, nonce []byte) ([]byte, error) {
 	hashedKey := hashKey(key)
 	msgBytes, err := protocol.EncodeMessage(msg)
 	if err != nil {
@@ -67,7 +67,7 @@ func encryptKeyshare(msg Message, key []byte, nonce []byte) ([]byte, error) {
 	return ciphertext, nil
 }
 
-func getAliceOut(msg *protocol.Message) (AliceOut, error) {
+func GetAliceOut(msg *protocol.Message) (AliceOut, error) {
 	return dklsv1.DecodeAliceDkgResult(msg)
 }
 
@@ -79,11 +79,11 @@ func getAlicePubPoint(msg *protocol.Message) (Point, error) {
 	return out.PublicKey, nil
 }
 
-func getBobOut(msg *protocol.Message) (BobOut, error) {
+func GetBobOut(msg *protocol.Message) (BobOut, error) {
 	return dklsv1.DecodeBobDkgResult(msg)
 }
 
-func getBobPubPoint(msg *protocol.Message) (Point, error) {
+func GetBobPubPoint(msg *protocol.Message) (Point, error) {
 	out, err := dklsv1.DecodeBobDkgResult(msg)
 	if err != nil {
 		return nil, err
@@ -103,7 +103,7 @@ func getEcdsaPoint(pubKey []byte) (*curves.EcPoint, error) {
 	return &curves.EcPoint{X: x, Y: y, Curve: ecCurve}, nil
 }
 
-func serializeSignature(sig *curves.EcdsaSignature) ([]byte, error) {
+func SerializeSignature(sig *curves.EcdsaSignature) ([]byte, error) {
 	if sig == nil {
 		return nil, errors.New("nil signature")
 	}
