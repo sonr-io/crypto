@@ -13,7 +13,6 @@ import (
 
 // enclave implements the Enclave interface
 type enclave struct {
-	// Serialized fields
 	PubPoint  curves.Point `json:"-"`
 	PubBytes  []byte       `json:"pub_key"`
 	ValShare  Message      `json:"val_share"`
@@ -22,24 +21,6 @@ type enclave struct {
 	// Extra fields
 	nonce []byte
 }
-
-func createEnclave(valShare, userShare Message) (Enclave, error) {
-	pubPoint, err := getAlicePubPoint(valShare)
-	if err != nil {
-		return nil, err
-	}
-	return &enclave{
-		PubPoint:  pubPoint,
-		ValShare:  valShare,
-		UserShare: userShare,
-		nonce:     randNonce(),
-	}, nil
-}
-
-// // DID returns the DID of the keyEnclave
-// func (k *keyEnclave) DID() keys.DID {
-// 	return keys.NewFromPubKey(k.PubKey())
-// }
 
 // Export returns encrypted enclave data
 func (k *enclave) Export(key []byte) ([]byte, error) {

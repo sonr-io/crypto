@@ -23,7 +23,8 @@ func NewEnclave(nonce []byte) (Enclave, error) {
 	if err != nil {
 		return nil, err
 	}
-	return createEnclave(valRes, userRes)
+
+	return ImportEnclave(WithInitialShares(valRes, userRes))
 }
 
 // ExecuteSigning runs the MPC signing protocol
@@ -61,7 +62,7 @@ func ExecuteRefresh(refreshFuncVal RefreshFunc, refreshFuncUser RefreshFunc, non
 	if err != nil {
 		return nil, err
 	}
-	return createEnclave(valRefreshResult, userRefreshResult)
+	return ImportEnclave(WithInitialShares(valRefreshResult, userRefreshResult))
 }
 
 // For DKG bob starts first. For refresh and sign, Alice starts first.
