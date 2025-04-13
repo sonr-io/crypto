@@ -17,9 +17,7 @@ type enclave struct {
 	PubBytes  []byte       `json:"pub_key"`
 	ValShare  Message      `json:"val_share"`
 	UserShare Message      `json:"user_share"`
-
-	// Extra fields
-	nonce []byte
+	Nonce     []byte       `json:"nonce"`
 }
 
 // Export returns encrypted enclave data
@@ -40,7 +38,7 @@ func (k *enclave) Export(key []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	return aesgcm.Seal(nil, k.nonce, data, nil), nil
+	return aesgcm.Seal(nil, k.Nonce, data, nil), nil
 }
 
 // IsValid returns true if the keyEnclave is valid
@@ -58,7 +56,7 @@ func (k *enclave) Refresh() (Enclave, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ExecuteRefresh(refreshFuncVal, refreshFuncUser, k.nonce)
+	return ExecuteRefresh(refreshFuncVal, refreshFuncUser, k.Nonce)
 }
 
 // Sign returns the signature of the data

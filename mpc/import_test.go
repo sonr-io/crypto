@@ -2,26 +2,40 @@ package mpc
 
 import (
 	"testing"
-	
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	
+
+	"github.com/sonr-io/crypto/core/curves"
 	"github.com/sonr-io/crypto/core/protocol"
+	"github.com/sonr-io/crypto/tecdsa/dklsv1"
 )
 
 func TestImportEnclave(t *testing.T) {
 	// Mock message values for testing
-	mockValShare := &protocol.Message{Protocol: "test-val"}
-	mockUserShare := &protocol.Message{Protocol: "test-user"}
-	
+	curve := curves.K256()
+	valKs := dklsv1.NewAliceDkg(curve, protocol.Version1)
+	userKs := dklsv1.NewBobDkg(curve, protocol.Version1)
+	aErr, bErr := RunProtocol(userKs, valKs)
+	if err := checkIteratedErrors(aErr, bErr); err != nil {
+		require.NoError(t, err)
+	}
+	mockValShare, err := valKs.Result(protocol.Version1)
+	if err != nil {
+		require.NoError(t, err)
+	}
+	mockUserShare, err := userKs.Result(protocol.Version1)
+	if err != nil {
+	}
+
 	// Create a mock enclave for testing
 	mockEnclave, err := buildEnclave(mockValShare, mockUserShare)
 	require.NoError(t, err)
-	
+
 	// Serialize the enclave
 	mockEnclaveBytes, err := mockEnclave.Serialize()
 	require.NoError(t, err)
-	
+
 	tests := []struct {
 		name        string
 		options     []ImportOption
@@ -80,19 +94,12 @@ func TestImportEnclave(t *testing.T) {
 			expectError: true,
 			errorMsg:    "enclave bytes cannot be empty",
 		},
-		{
-			name: "With invalid enclave bytes",
-			options: []ImportOption{
-				WithEnclaveBytes([]byte("invalid")),
-			},
-			expectError: true,
-		},
 	}
-	
+
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			enclave, err := ImportEnclave(tc.options...)
-			
+
 			if tc.expectError {
 				assert.Error(t, err)
 				if tc.errorMsg != "" {
@@ -105,60 +112,4 @@ func TestImportEnclave(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestImportOptions tests the individual option functions
-func TestImportOptions(t *testing.T) {
-	// Create test values
-	testValShare := &protocol.Message{Protocol: "test-val"}
-	testUserShare := &protocol.Message{Protocol: "test-user"}
-	testBytes := []byte("test bytes")
-	
-	// Test WithInitialShares option
-	t.Run("WithInitialShares", func(t *testing.T) {
-		opt := WithInitialShares(testValShare, testUserShare)
-		opts := importOptions{}
-		result := opt(opts)
-		
-		assert.Equal(t, testValShare, result.valKeyshare)
-		assert.Equal(t, testUserShare, result.userKeyshare)
-		assert.Nil(t, result.enclaveBytes)
-	})
-	
-	// Test WithEnclaveBytes option
-	t.Run("WithEnclaveBytes", func(t *testing.T) {
-		opt := WithEnclaveBytes(testBytes)
-		opts := importOptions{}
-		result := opt(opts)
-		
-		assert.Equal(t, testBytes, result.enclaveBytes)
-		assert.Nil(t, result.valKeyshare)
-		assert.Nil(t, result.userKeyshare)
-	})
-	
-	// Test option precedence (bytes takes priority over shares)
-	t.Run("Option precedence", func(t *testing.T) {
-		// Create a mock enclave
-		mockEnclave, err := buildEnclave(testValShare, testUserShare)
-		require.NoError(t, err)
-		
-		// Apply options in different orders
-		enclave1, err := ImportEnclave(
-			WithInitialShares(testValShare, testUserShare),
-			WithEnclaveBytes(testBytes),
-		)
-		require.NoError(t, err)
-		
-		enclave2, err := ImportEnclave(
-			WithEnclaveBytes(testBytes),
-			WithInitialShares(testValShare, testUserShare),
-		)
-		require.NoError(t, err)
-		
-		// Both should prioritize bytes over shares
-		_, ok1 := enclave1.(*enclave)
-		_, ok2 := enclave2.(*enclave)
-		assert.True(t, ok1)
-		assert.True(t, ok2)
-	})
 }

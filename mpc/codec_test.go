@@ -9,9 +9,8 @@ import (
 
 func TestKeyShareGeneration(t *testing.T) {
 	t.Run("Generate Valid Enclave", func(t *testing.T) {
-		nonce := randNonce()
 		// Generate enclave
-		enclave, err := NewEnclave(nonce)
+		enclave, err := NewEnclave()
 		require.NoError(t, err)
 		require.NotNil(t, enclave)
 
@@ -20,9 +19,8 @@ func TestKeyShareGeneration(t *testing.T) {
 	})
 
 	t.Run("Export and Import", func(t *testing.T) {
-		nonce := randNonce()
 		// Generate original enclave
-		original, err := NewEnclave(nonce)
+		original, err := NewEnclave()
 		require.NoError(t, err)
 
 		// Test key for encryption/decryption (32 bytes)
@@ -36,7 +34,7 @@ func TestKeyShareGeneration(t *testing.T) {
 			require.NotEmpty(t, data)
 
 			// Create new empty enclave
-			newEnclave, err := NewEnclave(nonce)
+			newEnclave, err := NewEnclave()
 			require.NoError(t, err)
 
 			// Verify the imported enclave works by signing
@@ -52,9 +50,8 @@ func TestKeyShareGeneration(t *testing.T) {
 
 func TestEnclaveOperations(t *testing.T) {
 	t.Run("Signing and Verification", func(t *testing.T) {
-		nonce := randNonce()
 		// Generate valid enclave
-		enclave, err := NewEnclave(nonce)
+		enclave, err := NewEnclave()
 		require.NoError(t, err)
 
 		// Test signing
@@ -76,8 +73,7 @@ func TestEnclaveOperations(t *testing.T) {
 	})
 
 	t.Run("Refresh Operation", func(t *testing.T) {
-		nonce := randNonce()
-		enclave, err := NewEnclave(nonce)
+		enclave, err := NewEnclave()
 		require.NoError(t, err)
 
 		// Test refresh
@@ -92,9 +88,8 @@ func TestEnclaveOperations(t *testing.T) {
 
 func TestEnclaveSerialization(t *testing.T) {
 	t.Run("Marshal and Unmarshal", func(t *testing.T) {
-		nonce := randNonce()
 		// Generate original enclave
-		original, err := NewEnclave(nonce)
+		original, err := NewEnclave()
 		require.NoError(t, err)
 		require.NotNil(t, original)
 

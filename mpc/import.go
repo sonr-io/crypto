@@ -11,7 +11,7 @@ func ImportEnclave(options ...ImportOption) (Enclave, error) {
 	if len(options) == 0 {
 		return nil, errors.New("no import options provided")
 	}
-	
+
 	opts := importOptions{}
 	for _, opt := range options {
 		opts = opt(opts)
@@ -20,9 +20,10 @@ func ImportEnclave(options ...ImportOption) (Enclave, error) {
 }
 
 type importOptions struct {
-	valKeyshare  Message
-	userKeyshare Message
-	enclaveBytes []byte
+	valKeyshare   Message
+	userKeyshare  Message
+	enclaveBytes  []byte
+	initialShares bool
 }
 
 type ImportOption func(importOptions) importOptions
@@ -32,6 +33,7 @@ func WithInitialShares(valKeyshare Message, userKeyshare Message) ImportOption {
 	return func(opts importOptions) importOptions {
 		opts.valKeyshare = valKeyshare
 		opts.userKeyshare = userKeyshare
+		opts.initialShares = true
 		return opts
 	}
 }
@@ -40,33 +42,28 @@ func WithInitialShares(valKeyshare Message, userKeyshare Message) ImportOption {
 func WithEnclaveBytes(enclaveBytes []byte) ImportOption {
 	return func(opts importOptions) importOptions {
 		opts.enclaveBytes = enclaveBytes
+		opts.initialShares = false
 		return opts
 	}
 }
 
 func (opts importOptions) Apply() (Enclave, error) {
 	// First try to restore from enclave bytes if provided
-	if len(opts.enclaveBytes) > 0 {
-		if len(opts.enclaveBytes) < 10 { // Minimum size for valid serialized enclave
-			return nil, errors.New("enclave bytes cannot be empty or too small")
+	if !opts.initialShares {
+		if len(opts.enclaveBytes) == 0 {
+			return nil, errors.New("enclave bytes cannot be empty")
 		}
 		return restoreEnclave(opts.enclaveBytes)
-	}
-	
-	// Then try to build from keyshares
-	if opts.valKeyshare != nil && opts.userKeyshare != nil {
+	} else {
+		// Then try to build from keyshares
+		if opts.valKeyshare == nil {
+			return nil, errors.New("validator share cannot be nil")
+		}
+		if opts.userKeyshare == nil {
+			return nil, errors.New("user share cannot be nil")
+		}
 		return buildEnclave(opts.valKeyshare, opts.userKeyshare)
 	}
-	
-	// Report specific errors for missing components
-	if opts.valKeyshare == nil && opts.userKeyshare != nil {
-		return nil, errors.New("validator share cannot be nil")
-	}
-	if opts.valKeyshare != nil && opts.userKeyshare == nil {
-		return nil, errors.New("user share cannot be nil")
-	}
-	
-	return nil, errors.New("no valid import options provided")
 }
 
 // buildEnclave creates a new enclave from validator and user keyshares.
@@ -77,17 +74,17 @@ func buildEnclave(valShare, userShare Message) (Enclave, error) {
 	if userShare == nil {
 		return nil, errors.New("user share cannot be nil")
 	}
-	
+
 	pubPoint, err := getAlicePubPoint(valShare)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get public point: %w", err)
 	}
-	
+
 	return &enclave{
 		PubPoint:  pubPoint,
 		ValShare:  valShare,
 		UserShare: userShare,
-		nonce:     randNonce(),
+		Nonce:     randNonce(),
 	}, nil
 }
 
@@ -96,12 +93,12 @@ func restoreEnclave(data []byte) (Enclave, error) {
 	if len(data) == 0 {
 		return nil, errors.New("enclave bytes cannot be empty")
 	}
-	
+
 	keyclave := &enclave{}
 	err := keyclave.Unmarshal(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal enclave: %w", err)
 	}
-	
+
 	return keyclave, nil
 }
