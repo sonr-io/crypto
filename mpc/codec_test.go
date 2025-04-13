@@ -1,24 +1,17 @@
 package mpc
 
 import (
-	"crypto/rand"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func randNonce() []byte {
-	nonce := make([]byte, 12)
-	rand.Read(nonce)
-	return nonce
-}
-
 func TestKeyShareGeneration(t *testing.T) {
 	t.Run("Generate Valid Enclave", func(t *testing.T) {
 		nonce := randNonce()
 		// Generate enclave
-		enclave, err := GenEnclave(nonce)
+		enclave, err := NewEnclave(nonce)
 		require.NoError(t, err)
 		require.NotNil(t, enclave)
 
@@ -29,7 +22,7 @@ func TestKeyShareGeneration(t *testing.T) {
 	t.Run("Export and Import", func(t *testing.T) {
 		nonce := randNonce()
 		// Generate original enclave
-		original, err := GenEnclave(nonce)
+		original, err := NewEnclave(nonce)
 		require.NoError(t, err)
 
 		// Test key for encryption/decryption (32 bytes)
@@ -43,11 +36,7 @@ func TestKeyShareGeneration(t *testing.T) {
 			require.NotEmpty(t, data)
 
 			// Create new empty enclave
-			newEnclave, err := GenEnclave(nonce)
-			require.NoError(t, err)
-
-			// Import enclave
-			err = newEnclave.Import(data, testKey)
+			newEnclave, err := NewEnclave(nonce)
 			require.NoError(t, err)
 
 			// Verify the imported enclave works by signing
@@ -58,16 +47,6 @@ func TestKeyShareGeneration(t *testing.T) {
 			require.NoError(t, err)
 			assert.True(t, valid)
 		})
-
-		// Test Invalid Key
-		t.Run("Invalid Key", func(t *testing.T) {
-			data, err := original.Export(testKey)
-			require.NoError(t, err)
-
-			wrongKey := []byte("wrong-key-12345678")
-			err = original.Import(data, wrongKey)
-			assert.Error(t, err)
-		})
 	})
 }
 
@@ -75,7 +54,7 @@ func TestEnclaveOperations(t *testing.T) {
 	t.Run("Signing and Verification", func(t *testing.T) {
 		nonce := randNonce()
 		// Generate valid enclave
-		enclave, err := GenEnclave(nonce)
+		enclave, err := NewEnclave(nonce)
 		require.NoError(t, err)
 
 		// Test signing
@@ -98,7 +77,7 @@ func TestEnclaveOperations(t *testing.T) {
 
 	t.Run("Refresh Operation", func(t *testing.T) {
 		nonce := randNonce()
-		enclave, err := GenEnclave(nonce)
+		enclave, err := NewEnclave(nonce)
 		require.NoError(t, err)
 
 		// Test refresh
@@ -115,12 +94,12 @@ func TestEnclaveSerialization(t *testing.T) {
 	t.Run("Marshal and Unmarshal", func(t *testing.T) {
 		nonce := randNonce()
 		// Generate original enclave
-		original, err := GenEnclave(nonce)
+		original, err := NewEnclave(nonce)
 		require.NoError(t, err)
 		require.NotNil(t, original)
 
 		// Marshal
-		keyclave, ok := original.(*keyEnclave)
+		keyclave, ok := original.(*enclave)
 		require.True(t, ok)
 
 		data, err := keyclave.Serialize()
@@ -128,7 +107,7 @@ func TestEnclaveSerialization(t *testing.T) {
 		require.NotEmpty(t, data)
 
 		// Unmarshal
-		restored := &keyEnclave{}
+		restored := &enclave{}
 		err = restored.Unmarshal(data)
 		require.NoError(t, err)
 

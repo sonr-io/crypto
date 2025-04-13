@@ -6,8 +6,8 @@ import (
 	"github.com/sonr-io/crypto/tecdsa/dklsv1"
 )
 
-// GenEnclave generates a new MPC keyshare
-func GenEnclave(nonce []byte) (Enclave, error) {
+// NewEnclave generates a new MPC keyshare
+func NewEnclave(nonce []byte) (Enclave, error) {
 	curve := curves.K256()
 	valKs := dklsv1.NewAliceDkg(curve, protocol.Version1)
 	userKs := dklsv1.NewBobDkg(curve, protocol.Version1)
@@ -23,7 +23,7 @@ func GenEnclave(nonce []byte) (Enclave, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newEnclave(valRes, userRes, nonce)
+	return createEnclave(valRes, userRes)
 }
 
 // ExecuteSigning runs the MPC signing protocol
@@ -61,7 +61,7 @@ func ExecuteRefresh(refreshFuncVal RefreshFunc, refreshFuncUser RefreshFunc, non
 	if err != nil {
 		return nil, err
 	}
-	return newEnclave(valRefreshResult, userRefreshResult, nonce)
+	return createEnclave(valRefreshResult, userRefreshResult)
 }
 
 // For DKG bob starts first. For refresh and sign, Alice starts first.

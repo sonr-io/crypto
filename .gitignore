@@ -22,3 +22,11 @@ coverage.html
 /.env
 /.envrc
 .aider*
+
+go.work
+go.work.sum
+go.work.mod
+go.work.sum
+
+# Ignore the following files
+# Ignore the following files

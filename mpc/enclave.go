@@ -11,8 +11,8 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
-// keyEnclave implements the Enclave interface
-type keyEnclave struct {
+// enclave implements the Enclave interface
+type enclave struct {
 	// Serialized fields
 	PubPoint  curves.Point `json:"-"`
 	PubBytes  []byte       `json:"pub_key"`
@@ -23,16 +23,16 @@ type keyEnclave struct {
 	nonce []byte
 }
 
-func newEnclave(valShare, userShare Message, nonce []byte) (Enclave, error) {
+func createEnclave(valShare, userShare Message) (Enclave, error) {
 	pubPoint, err := getAlicePubPoint(valShare)
 	if err != nil {
 		return nil, err
 	}
-	return &keyEnclave{
+	return &enclave{
 		PubPoint:  pubPoint,
 		ValShare:  valShare,
 		UserShare: userShare,
-		nonce:     nonce,
+		nonce:     randNonce(),
 	}, nil
 }
 
@@ -42,7 +42,7 @@ func newEnclave(valShare, userShare Message, nonce []byte) (Enclave, error) {
 // }
 
 // Export returns encrypted enclave data
-func (k *keyEnclave) Export(key []byte) ([]byte, error) {
+func (k *enclave) Export(key []byte) ([]byte, error) {
 	data, err := k.Serialize()
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize enclave: %w", err)
@@ -62,40 +62,13 @@ func (k *keyEnclave) Export(key []byte) ([]byte, error) {
 	return aesgcm.Seal(nil, k.nonce, data, nil), nil
 }
 
-// Import decrypts and loads enclave data
-func (k *keyEnclave) Import(data []byte, key []byte) error {
-	hashedKey := hashKey(key)
-	block, err := aes.NewCipher(hashedKey)
-	if err != nil {
-		return err
-	}
-
-	aesgcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return err
-	}
-
-	decrypted, err := aesgcm.Open(nil, k.nonce, data, nil)
-	if err != nil {
-		return err
-	}
-
-	return k.Unmarshal(decrypted)
-}
-
 // IsValid returns true if the keyEnclave is valid
-func (k *keyEnclave) IsValid() bool {
+func (k *enclave) IsValid() bool {
 	return k.PubPoint != nil && k.ValShare != nil && k.UserShare != nil
 }
 
-//
-// // PubKey returns the public key of the keyEnclave
-// func (k *keyEnclave) PubKey() keys.PubKey {
-// 	return keys.NewPubKey(k.PubPoint)
-// }
-
 // Refresh returns a new keyEnclave
-func (k *keyEnclave) Refresh() (Enclave, error) {
+func (k *enclave) Refresh() (Enclave, error) {
 	refreshFuncVal, err := valRefreshFunc(k)
 	if err != nil {
 		return nil, err
@@ -108,7 +81,7 @@ func (k *keyEnclave) Refresh() (Enclave, error) {
 }
 
 // Sign returns the signature of the data
-func (k *keyEnclave) Sign(data []byte) ([]byte, error) {
+func (k *enclave) Sign(data []byte) ([]byte, error) {
 	userSign, err := userSignFunc(k, data)
 	if err != nil {
 		return nil, err
@@ -121,7 +94,7 @@ func (k *keyEnclave) Sign(data []byte) ([]byte, error) {
 }
 
 // Verify returns true if the signature is valid
-func (k *keyEnclave) Verify(data []byte, sig []byte) (bool, error) {
+func (k *enclave) Verify(data []byte, sig []byte) (bool, error) {
 	edSig, err := deserializeSignature(sig)
 	if err != nil {
 		return false, err
@@ -145,14 +118,14 @@ func (k *keyEnclave) Verify(data []byte, sig []byte) (bool, error) {
 }
 
 // Marshal returns the JSON encoding of keyEnclave
-func (k *keyEnclave) Serialize() ([]byte, error) {
+func (k *enclave) Serialize() ([]byte, error) {
 	// Store compressed public point bytes before marshaling
 	k.PubBytes = k.PubPoint.ToAffineCompressed()
 	return json.Marshal(k)
 }
 
 // Unmarshal parses the JSON-encoded data and stores the result
-func (k *keyEnclave) Unmarshal(data []byte) error {
+func (k *enclave) Unmarshal(data []byte) error {
 	if err := json.Unmarshal(data, k); err != nil {
 		return err
 	}

@@ -1,6 +1,8 @@
 package mpc
 
 import (
+	"crypto/rand"
+
 	"github.com/sonr-io/crypto/core/curves"
 	"github.com/sonr-io/crypto/core/protocol"
 	"github.com/sonr-io/crypto/tecdsa/dklsv1/dkg"
@@ -26,12 +28,17 @@ const (
 	RoleUser = "user"
 )
 
+func randNonce() []byte {
+	nonce := make([]byte, 12)
+	rand.Read(nonce)
+	return nonce
+}
+
 // Enclave defines the interface for key management operations
 type Enclave interface {
 	// DID() keys.DID                        // DID returns the DID of the keyEnclave
-	Export(key []byte) ([]byte, error)    // Export returns encrypted enclave data
-	Import(data []byte, key []byte) error // Import decrypts and loads enclave data
-	IsValid() bool                        // IsValid returns true if the keyEnclave is valid
+	Export(key []byte) ([]byte, error) // Export returns encrypted enclave data
+	IsValid() bool                     // IsValid returns true if the keyEnclave is valid
 	// PubKey() keys.PubKey                          // PubKey returns the public key of the keyEnclave
 	Refresh() (Enclave, error)                    // Refresh returns a new keyEnclave
 	Serialize() ([]byte, error)                   // Serialize returns the serialized keyEnclave
