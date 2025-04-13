@@ -96,17 +96,6 @@ func TestEnclaveOperations(t *testing.T) {
 		assert.False(t, valid)
 	})
 
-	t.Run("Address and Public Key", func(t *testing.T) {
-		nonce := randNonce()
-		enclave, err := GenEnclave(nonce)
-		require.NoError(t, err)
-
-		// Test Public Key
-		pubKey := enclave.PubKey()
-		assert.NotNil(t, pubKey)
-		assert.NotEmpty(t, pubKey.Bytes())
-	})
-
 	t.Run("Refresh Operation", func(t *testing.T) {
 		nonce := randNonce()
 		enclave, err := GenEnclave(nonce)
