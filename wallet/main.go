@@ -9,14 +9,13 @@ import (
 
 //go:wasmexport new_enclave
 func newEnclave() int32 {
-	input := pdk.Input()
 	e, err := mpc.NewEnclave()
 	if err != nil {
 		pdk.Log(pdk.LogError, err.Error())
 		return 1
 	}
 	pdk.Log(pdk.LogInfo, "Enclave created")
-	bz, err := e.Export(input)
+	bz, err := e.Serialize()
 	if err != nil {
 		pdk.Log(pdk.LogError, err.Error())
 		return 1
