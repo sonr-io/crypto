@@ -5,9 +5,9 @@ import (
 	"crypto/ecdsa"
 	"encoding/hex"
 
-	"github.com/sonr-io/crypto/core/curves"
 	p2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	p2ppb "github.com/libp2p/go-libp2p/core/crypto/pb"
+	"github.com/sonr-io/crypto/core/curves"
 	"golang.org/x/crypto/sha3"
 )
 

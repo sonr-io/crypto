@@ -10,7 +10,6 @@ import (
 	"github.com/sonr-io/crypto/core/curves"
 	"github.com/sonr-io/crypto/core/protocol"
 	"github.com/sonr-io/crypto/tecdsa/dklsv1"
-	"github.com/cosmos/cosmos-sdk/types/bech32"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -25,15 +24,6 @@ func checkIteratedErrors(aErr, bErr error) error {
 		return bErr
 	}
 	return nil
-}
-
-func computeSonrAddr(pp Point) (string, error) {
-	pk := pp.ToAffineCompressed()
-	sonrAddr, err := bech32.ConvertAndEncode("idx", pk)
-	if err != nil {
-		return "", err
-	}
-	return sonrAddr, nil
 }
 
 func hashKey(key []byte) []byte {

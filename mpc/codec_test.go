@@ -2,7 +2,6 @@ package mpc
 
 import (
 	"crypto/rand"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -102,11 +101,6 @@ func TestEnclaveOperations(t *testing.T) {
 		enclave, err := GenEnclave(nonce)
 		require.NoError(t, err)
 
-		// Test Address
-		addr := enclave.Address()
-		assert.NotEmpty(t, addr)
-		assert.True(t, strings.HasPrefix(addr, "idx"))
-
 		// Test Public Key
 		pubKey := enclave.PubKey()
 		assert.NotNil(t, pubKey)
@@ -125,9 +119,6 @@ func TestEnclaveOperations(t *testing.T) {
 
 		// Verify refreshed enclave is valid
 		assert.True(t, refreshedEnclave.IsValid())
-
-		// Verify it maintains the same address
-		assert.Equal(t, enclave.Address(), refreshedEnclave.Address())
 	})
 }
 
@@ -153,7 +144,6 @@ func TestEnclaveSerialization(t *testing.T) {
 		require.NoError(t, err)
 
 		// Verify restored enclave
-		assert.Equal(t, keyclave.Addr, restored.Addr)
 		assert.True(t, keyclave.PubPoint.Equal(restored.PubPoint))
 		assert.True(t, restored.IsValid())
 	})

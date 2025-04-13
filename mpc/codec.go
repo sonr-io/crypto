@@ -3,7 +3,6 @@ package mpc
 import (
 	"github.com/sonr-io/crypto/core/curves"
 	"github.com/sonr-io/crypto/core/protocol"
-	"github.com/sonr-io/crypto/keys"
 	"github.com/sonr-io/crypto/tecdsa/dklsv1/dkg"
 )
 
@@ -29,12 +28,11 @@ const (
 
 // Enclave defines the interface for key management operations
 type Enclave interface {
-	Address() string                              // Address returns the Sonr address of the keyEnclave
-	DID() keys.DID                                // DID returns the DID of the keyEnclave
-	Export(key []byte) ([]byte, error)            // Export returns encrypted enclave data
-	Import(data []byte, key []byte) error         // Import decrypts and loads enclave data
-	IsValid() bool                                // IsValid returns true if the keyEnclave is valid
-	PubKey() keys.PubKey                          // PubKey returns the public key of the keyEnclave
+	// DID() keys.DID                        // DID returns the DID of the keyEnclave
+	Export(key []byte) ([]byte, error)    // Export returns encrypted enclave data
+	Import(data []byte, key []byte) error // Import decrypts and loads enclave data
+	IsValid() bool                        // IsValid returns true if the keyEnclave is valid
+	// PubKey() keys.PubKey                          // PubKey returns the public key of the keyEnclave
 	Refresh() (Enclave, error)                    // Refresh returns a new keyEnclave
 	Serialize() ([]byte, error)                   // Serialize returns the serialized keyEnclave
 	Sign(data []byte) ([]byte, error)             // Sign returns the signature of the data

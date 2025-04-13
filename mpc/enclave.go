@@ -8,14 +8,12 @@ import (
 	"fmt"
 
 	"github.com/sonr-io/crypto/core/curves"
-	"github.com/sonr-io/crypto/keys"
 	"golang.org/x/crypto/sha3"
 )
 
 // keyEnclave implements the Enclave interface
 type keyEnclave struct {
 	// Serialized fields
-	Addr      string       `json:"address"`
 	PubPoint  curves.Point `json:"-"`
 	PubBytes  []byte       `json:"pub_key"`
 	ValShare  Message      `json:"val_share"`
@@ -30,13 +28,7 @@ func newEnclave(valShare, userShare Message, nonce []byte) (Enclave, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	addr, err := computeSonrAddr(pubPoint)
-	if err != nil {
-		return nil, err
-	}
 	return &keyEnclave{
-		Addr:      addr,
 		PubPoint:  pubPoint,
 		ValShare:  valShare,
 		UserShare: userShare,
@@ -44,15 +36,10 @@ func newEnclave(valShare, userShare Message, nonce []byte) (Enclave, error) {
 	}, nil
 }
 
-// Address returns the Sonr address of the keyEnclave
-func (k *keyEnclave) Address() string {
-	return k.Addr
-}
-
-// DID returns the DID of the keyEnclave
-func (k *keyEnclave) DID() keys.DID {
-	return keys.NewFromPubKey(k.PubKey())
-}
+// // DID returns the DID of the keyEnclave
+// func (k *keyEnclave) DID() keys.DID {
+// 	return keys.NewFromPubKey(k.PubKey())
+// }
 
 // Export returns encrypted enclave data
 func (k *keyEnclave) Export(key []byte) ([]byte, error) {
@@ -98,13 +85,14 @@ func (k *keyEnclave) Import(data []byte, key []byte) error {
 
 // IsValid returns true if the keyEnclave is valid
 func (k *keyEnclave) IsValid() bool {
-	return k.PubPoint != nil && k.ValShare != nil && k.UserShare != nil && k.Addr != ""
+	return k.PubPoint != nil && k.ValShare != nil && k.UserShare != nil
 }
 
-// PubKey returns the public key of the keyEnclave
-func (k *keyEnclave) PubKey() keys.PubKey {
-	return keys.NewPubKey(k.PubPoint)
-}
+//
+// // PubKey returns the public key of the keyEnclave
+// func (k *keyEnclave) PubKey() keys.PubKey {
+// 	return keys.NewPubKey(k.PubPoint)
+// }
 
 // Refresh returns a new keyEnclave
 func (k *keyEnclave) Refresh() (Enclave, error) {
