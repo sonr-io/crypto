@@ -13,33 +13,12 @@ import (
 
 // enclave implements the Enclave interface
 type enclave struct {
-	// Serialized fields
 	PubPoint  curves.Point `json:"-"`
 	PubBytes  []byte       `json:"pub_key"`
 	ValShare  Message      `json:"val_share"`
 	UserShare Message      `json:"user_share"`
-
-	// Extra fields
-	nonce []byte
+	Nonce     []byte       `json:"nonce"`
 }
-
-func createEnclave(valShare, userShare Message) (Enclave, error) {
-	pubPoint, err := getAlicePubPoint(valShare)
-	if err != nil {
-		return nil, err
-	}
-	return &enclave{
-		PubPoint:  pubPoint,
-		ValShare:  valShare,
-		UserShare: userShare,
-		nonce:     randNonce(),
-	}, nil
-}
-
-// // DID returns the DID of the keyEnclave
-// func (k *keyEnclave) DID() keys.DID {
-// 	return keys.NewFromPubKey(k.PubKey())
-// }
 
 // Export returns encrypted enclave data
 func (k *enclave) Export(key []byte) ([]byte, error) {
@@ -59,7 +38,7 @@ func (k *enclave) Export(key []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	return aesgcm.Seal(nil, k.nonce, data, nil), nil
+	return aesgcm.Seal(nil, k.Nonce, data, nil), nil
 }
 
 // IsValid returns true if the keyEnclave is valid
@@ -77,7 +56,7 @@ func (k *enclave) Refresh() (Enclave, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ExecuteRefresh(refreshFuncVal, refreshFuncUser, k.nonce)
+	return ExecuteRefresh(refreshFuncVal, refreshFuncUser, k.Nonce)
 }
 
 // Sign returns the signature of the data
