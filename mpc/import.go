@@ -38,8 +38,8 @@ func WithInitialShares(valKeyshare Message, userKeyshare Message) ImportOption {
 	}
 }
 
-// WithEnclaveBytes creates an option to import an enclave from serialized bytes.
-func WithEnclaveBytes(enclaveBytes []byte) ImportOption {
+// WithEnclaveJSON creates an option to import an enclave from serialized bytes.
+func WithEnclaveJSON(enclaveBytes []byte) ImportOption {
 	return func(opts importOptions) importOptions {
 		opts.enclaveBytes = enclaveBytes
 		opts.initialShares = false
@@ -95,7 +95,7 @@ func restoreEnclave(data []byte) (Enclave, error) {
 	}
 
 	keyclave := &enclave{}
-	err := keyclave.Unmarshal(data)
+	err := keyclave.Deserialize(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal enclave: %w", err)
 	}

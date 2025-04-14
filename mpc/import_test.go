@@ -58,7 +58,7 @@ func TestImportEnclave(t *testing.T) {
 		{
 			name: "With valid enclave bytes",
 			options: []ImportOption{
-				WithEnclaveBytes(mockEnclaveBytes),
+				WithEnclaveJSON(mockEnclaveBytes),
 			},
 			expectError: false,
 		},
@@ -66,7 +66,7 @@ func TestImportEnclave(t *testing.T) {
 			name: "With both shares and bytes (bytes take priority)",
 			options: []ImportOption{
 				WithInitialShares(mockValShare, mockUserShare),
-				WithEnclaveBytes(mockEnclaveBytes),
+				WithEnclaveJSON(mockEnclaveBytes),
 			},
 			expectError: false,
 		},
@@ -89,7 +89,7 @@ func TestImportEnclave(t *testing.T) {
 		{
 			name: "With empty enclave bytes",
 			options: []ImportOption{
-				WithEnclaveBytes([]byte{}),
+				WithEnclaveJSON([]byte{}),
 			},
 			expectError: true,
 			errorMsg:    "enclave bytes cannot be empty",

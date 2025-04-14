@@ -103,7 +103,7 @@ func TestEnclaveSerialization(t *testing.T) {
 
 		// Unmarshal
 		restored := &enclave{}
-		err = restored.Unmarshal(data)
+		err = restored.Deserialize(data)
 		require.NoError(t, err)
 
 		// Verify restored enclave

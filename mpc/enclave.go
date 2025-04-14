@@ -103,8 +103,8 @@ func (k *enclave) Serialize() ([]byte, error) {
 	return json.Marshal(k)
 }
 
-// Unmarshal parses the JSON-encoded data and stores the result
-func (k *enclave) Unmarshal(data []byte) error {
+// Deserialize parses the JSON-encoded data and stores the result
+func (k *enclave) Deserialize(data []byte) error {
 	if err := json.Unmarshal(data, k); err != nil {
 		return err
 	}
