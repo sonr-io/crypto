@@ -1,4 +1,5 @@
 *.aiderscript
+*.wasm
 
 bin
 .DS_Store
