@@ -2,6 +2,9 @@
 
 PROTO_DIR = ./proto
 
+build:
+	@$(MAKE) -C signer build
+
 # Generate protobuf files
 proto-gen:
 	@echo "Generating Protobuf files..."
