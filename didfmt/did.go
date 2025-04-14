@@ -86,11 +86,11 @@ func (d DID) PubKey() (crypto.PubKey, error) {
 	unmarshaler, ok := map[multicodec.Code]crypto.PubKeyUnmarshaller{
 		X25519:    crypto.UnmarshalEd25519PublicKey,
 		Ed25519:   crypto.UnmarshalEd25519PublicKey,
-		P256:      ecdsaPubKeyUnmarshaler(elliptic.P256()),
-		P384:      ecdsaPubKeyUnmarshaler(elliptic.P384()),
-		P521:      ecdsaPubKeyUnmarshaler(elliptic.P521()),
+		P256:      ECDSAPubKeyUnmarshaler(elliptic.P256()),
+		P384:      ECDSAPubKeyUnmarshaler(elliptic.P384()),
+		P521:      ECDSAPubKeyUnmarshaler(elliptic.P521()),
 		Secp256k1: crypto.UnmarshalSecp256k1PublicKey,
-		RSA:       rsaPubKeyUnmarshaller,
+		RSA:       RSAPubKeyUnmarshaler,
 	}[d.code]
 	if !ok {
 		return nil, fmt.Errorf("unsupported multicodec: %d", d.code)
@@ -106,7 +106,7 @@ func (d DID) String() string {
 	return "did:key:" + key
 }
 
-func ecdsaPubKeyUnmarshaler(curve elliptic.Curve) crypto.PubKeyUnmarshaller {
+func ECDSAPubKeyUnmarshaler(curve elliptic.Curve) crypto.PubKeyUnmarshaller {
 	return func(data []byte) (crypto.PubKey, error) {
 		x, y := elliptic.UnmarshalCompressed(curve, data)
 
@@ -125,7 +125,7 @@ func ecdsaPubKeyUnmarshaler(curve elliptic.Curve) crypto.PubKeyUnmarshaller {
 	}
 }
 
-func rsaPubKeyUnmarshaller(data []byte) (crypto.PubKey, error) {
+func RSAPubKeyUnmarshaler(data []byte) (crypto.PubKey, error) {
 	rsaPublicKey, err := x509.ParsePKCS1PublicKey(data)
 	if err != nil {
 		return nil, err
