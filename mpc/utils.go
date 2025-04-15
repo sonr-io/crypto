@@ -139,22 +139,22 @@ func deserializeSignature(sigBytes []byte) (*curves.EcdsaSignature, error) {
 	}, nil
 }
 
-func userSignFunc(k *enclave, bz []byte) (SignFunc, error) {
+func userSignFunc(k *EnclaveData, bz []byte) (SignFunc, error) {
 	curve := curves.K256()
 	return dklsv1.NewBobSign(curve, sha3.New256(), bz, k.UserShare, protocol.Version1)
 }
 
-func userRefreshFunc(k *enclave) (RefreshFunc, error) {
+func userRefreshFunc(k *EnclaveData) (RefreshFunc, error) {
 	curve := curves.K256()
 	return dklsv1.NewBobRefresh(curve, k.UserShare, protocol.Version1)
 }
 
-func valSignFunc(k *enclave, bz []byte) (SignFunc, error) {
+func valSignFunc(k *EnclaveData, bz []byte) (SignFunc, error) {
 	curve := curves.K256()
 	return dklsv1.NewAliceSign(curve, sha3.New256(), bz, k.ValShare, protocol.Version1)
 }
 
-func valRefreshFunc(k *enclave) (RefreshFunc, error) {
+func valRefreshFunc(k *EnclaveData) (RefreshFunc, error) {
 	curve := curves.K256()
 	return dklsv1.NewAliceRefresh(curve, k.ValShare, protocol.Version1)
 }

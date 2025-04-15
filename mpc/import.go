@@ -80,7 +80,7 @@ func buildEnclave(valShare, userShare Message) (Enclave, error) {
 		return nil, fmt.Errorf("failed to get public point: %w", err)
 	}
 
-	return &enclave{
+	return &EnclaveData{
 		PubPoint:  pubPoint,
 		ValShare:  valShare,
 		UserShare: userShare,
@@ -94,7 +94,7 @@ func restoreEnclave(data []byte) (Enclave, error) {
 		return nil, errors.New("enclave bytes cannot be empty")
 	}
 
-	keyclave := &enclave{}
+	keyclave := &EnclaveData{}
 	err := keyclave.Deserialize(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal enclave: %w", err)
