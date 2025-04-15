@@ -21,8 +21,25 @@ type EnclaveData struct {
 }
 
 // Decrypt returns decrypted enclave data
-func (k *EnclaveData) Decrypt(key []byte) ([]byte, error) {
-	return nil, fmt.Errorf("not implemented")
+func (k *EnclaveData) Decrypt(key []byte, encryptedData []byte) ([]byte, error) {
+	hashedKey := hashKey(key)
+	block, err := aes.NewCipher(hashedKey)
+	if err != nil {
+		return nil, err
+	}
+
+	aesgcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+
+	// Decrypt the data using AES-GCM
+	plaintext, err := aesgcm.Open(nil, k.Nonce, encryptedData, nil)
+	if err != nil {
+		return nil, fmt.Errorf("decryption failed: %w", err)
+	}
+
+	return plaintext, nil
 }
 
 // Export returns encrypted enclave data
