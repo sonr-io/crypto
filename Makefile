@@ -1,9 +1,9 @@
-.PHONY: proto-gen proto-lint proto-format proto-check proto-clean proto-publish
+.PHONY: proto-gen proto-lint proto-format proto-check proto-clean proto-publish build
 
 PROTO_DIR = ./proto
 
 build:
-	@$(MAKE) -C signer build
+	@earthly +signer
 
 # Generate protobuf files
 proto-gen:
