@@ -37,8 +37,9 @@ func randNonce() []byte {
 // Enclave defines the interface for key management operations
 type Enclave interface {
 	// DID() keys.DID                        // DID returns the DID of the keyEnclave
-	Export(key []byte) ([]byte, error) // Export returns encrypted enclave data
-	IsValid() bool                     // IsValid returns true if the keyEnclave is valid
+	Decrypt(key []byte) ([]byte, error) // Decrypt returns decrypted enclave data
+	Encrypt(key []byte) ([]byte, error) // Encrypt returns encrypted enclave data
+	IsValid() bool                      // IsValid returns true if the keyEnclave is valid
 	// PubKey() keys.PubKey                          // PubKey returns the public key of the keyEnclave
 	Refresh() (Enclave, error)                    // Refresh returns a new keyEnclave
 	Serialize() ([]byte, error)                   // Serialize returns the serialized keyEnclave

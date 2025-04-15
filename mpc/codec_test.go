@@ -29,7 +29,7 @@ func TestKeyShareGeneration(t *testing.T) {
 		// Test Export/Import
 		t.Run("Full Enclave", func(t *testing.T) {
 			// Export enclave
-			data, err := original.Export(testKey)
+			data, err := original.Encrypt(testKey)
 			require.NoError(t, err)
 			require.NotEmpty(t, data)
 
@@ -94,7 +94,7 @@ func TestEnclaveSerialization(t *testing.T) {
 		require.NotNil(t, original)
 
 		// Marshal
-		keyclave, ok := original.(*enclave)
+		keyclave, ok := original.(*EnclaveData)
 		require.True(t, ok)
 
 		data, err := keyclave.Serialize()
@@ -102,7 +102,7 @@ func TestEnclaveSerialization(t *testing.T) {
 		require.NotEmpty(t, data)
 
 		// Unmarshal
-		restored := &enclave{}
+		restored := &EnclaveData{}
 		err = restored.Deserialize(data)
 		require.NoError(t, err)
 
