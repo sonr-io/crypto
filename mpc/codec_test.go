@@ -168,3 +168,49 @@ func TestEnclaveSerialization(t *testing.T) {
 		assert.True(t, restored.IsValid())
 	})
 }
+
+func TestEnclaveDataAccess(t *testing.T) {
+	t.Run("GetData", func(t *testing.T) {
+		// Generate enclave
+		enclave, err := NewEnclave()
+		require.NoError(t, err)
+		require.NotNil(t, enclave)
+
+		// Get the enclave data
+		data := enclave.GetData()
+		require.NotNil(t, data, "GetData should return non-nil value")
+
+		// Verify the data is valid
+		assert.True(t, data.IsValid(), "Enclave data should be valid")
+
+		// Verify the public key in the data matches the enclave's public key
+		assert.Equal(t, enclave.PubKeyHex(), data.PubKeyHex(), "Public keys should match")
+	})
+
+	t.Run("PubKeyHex", func(t *testing.T) {
+		// Generate enclave
+		enclave, err := NewEnclave()
+		require.NoError(t, err)
+		require.NotNil(t, enclave)
+
+		// Get the public key hex
+		pubKeyHex := enclave.PubKeyHex()
+		require.NotEmpty(t, pubKeyHex, "PubKeyHex should return non-empty string")
+
+		// Check that it's a valid hex string (should be 66 chars for compressed point: 0x02/0x03 + 32 bytes)
+		assert.GreaterOrEqual(t, len(pubKeyHex), 66, "Public key hex should be at least 66 characters")
+		assert.True(t, len(pubKeyHex)%2 == 0, "Hex string should have even length")
+
+		// Compare with the enclave data's public key
+		data := enclave.GetData()
+		assert.Equal(t, data.PubKeyHex(), pubKeyHex, "Public key hex should match the one from GetData")
+
+		// Verify that two different enclaves have different public keys
+		enclave2, err := NewEnclave()
+		require.NoError(t, err)
+		require.NotNil(t, enclave2)
+
+		pubKeyHex2 := enclave2.PubKeyHex()
+		assert.NotEqual(t, pubKeyHex, pubKeyHex2, "Different enclaves should have different public keys")
+	})
+}
