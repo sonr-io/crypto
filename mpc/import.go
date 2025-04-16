@@ -92,7 +92,7 @@ func BuildEnclave(valShare, userShare Message, options Options) (Enclave, error)
 	}
 	return &EnclaveData{
 		PubPoint:  pubPoint,
-		PubBytes:  pubPoint.ToAffineUncompressed(),
+		PubBytes:  pubPoint.ToAffineCompressed(),
 		ValShare:  valShare,
 		UserShare: userShare,
 		Nonce:     randNonce(),

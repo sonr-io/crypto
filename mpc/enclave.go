@@ -34,6 +34,7 @@ func (k *EnclaveData) GetEnclave() Enclave {
 
 // PubKeyHex returns the public key of the keyEnclave
 func (k *EnclaveData) PubKeyHex() string {
+	k.PubBytes = k.PubPoint.ToAffineCompressed()
 	return hex.EncodeToString(k.PubBytes)
 }
 
