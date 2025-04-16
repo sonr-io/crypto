@@ -27,6 +27,11 @@ func (k *EnclaveData) GetData() *EnclaveData {
 	return k
 }
 
+// GetEnclave returns the enclave of the keyEnclave
+func (k *EnclaveData) GetEnclave() Enclave {
+	return k
+}
+
 // PubKeyHex returns the public key of the keyEnclave
 func (k *EnclaveData) PubKeyHex() string {
 	return hex.EncodeToString(k.PubBytes)

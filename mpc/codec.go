@@ -83,6 +83,7 @@ func randNonce() []byte {
 // Enclave defines the interface for key management operations
 type Enclave interface {
 	GetData() *EnclaveData                                    // GetData returns the data of the keyEnclave
+	GetEnclave() Enclave                                      // GetEnclave returns the enclave of the keyEnclave
 	Decrypt(key []byte, encryptedData []byte) ([]byte, error) // Decrypt returns decrypted enclave data
 	Encrypt(key []byte) ([]byte, error)                       // Encrypt returns encrypted enclave data
 	IsValid() bool                                            // IsValid returns true if the keyEnclave is valid
