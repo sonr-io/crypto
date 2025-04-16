@@ -13,7 +13,7 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
-func checkIteratedErrors(aErr, bErr error) error {
+func CheckIteratedErrors(aErr, bErr error) error {
 	if aErr == protocol.ErrProtocolFinished && bErr == protocol.ErrProtocolFinished {
 		return nil
 	}
@@ -26,14 +26,14 @@ func checkIteratedErrors(aErr, bErr error) error {
 	return nil
 }
 
-func hashKey(key []byte) []byte {
+func GetHashKey(key []byte) []byte {
 	hash := sha3.New256()
 	hash.Write(key)
 	return hash.Sum(nil)[:32] // Use first 32 bytes of hash
 }
 
 func DecryptKeyshare(msg []byte, key []byte, nonce []byte) ([]byte, error) {
-	hashedKey := hashKey(key)
+	hashedKey := GetHashKey(key)
 	block, err := aes.NewCipher(hashedKey)
 	if err != nil {
 		return nil, err
@@ -50,7 +50,7 @@ func DecryptKeyshare(msg []byte, key []byte, nonce []byte) ([]byte, error) {
 }
 
 func EncryptKeyshare(msg Message, key []byte, nonce []byte) ([]byte, error) {
-	hashedKey := hashKey(key)
+	hashedKey := GetHashKey(key)
 	msgBytes, err := protocol.EncodeMessage(msg)
 	if err != nil {
 		return nil, err
@@ -71,7 +71,7 @@ func GetAliceOut(msg *protocol.Message) (AliceOut, error) {
 	return dklsv1.DecodeAliceDkgResult(msg)
 }
 
-func getAlicePubPoint(msg *protocol.Message) (Point, error) {
+func GetAlicePublicPoint(msg *protocol.Message) (Point, error) {
 	out, err := dklsv1.DecodeAliceDkgResult(msg)
 	if err != nil {
 		return nil, err
@@ -91,8 +91,8 @@ func GetBobPubPoint(msg *protocol.Message) (Point, error) {
 	return out.PublicKey, nil
 }
 
-// getEcdsaPoint builds an elliptic curve point from a compressed byte slice
-func getEcdsaPoint(pubKey []byte) (*curves.EcPoint, error) {
+// GetECDSAPoint builds an elliptic curve point from a compressed byte slice
+func GetECDSAPoint(pubKey []byte) (*curves.EcPoint, error) {
 	crv := curves.K256()
 	x := new(big.Int).SetBytes(pubKey[1:33])
 	y := new(big.Int).SetBytes(pubKey[33:])
@@ -125,7 +125,7 @@ func SerializeSignature(sig *curves.EcdsaSignature) ([]byte, error) {
 	return result, nil
 }
 
-func deserializeSignature(sigBytes []byte) (*curves.EcdsaSignature, error) {
+func DeserializeSignature(sigBytes []byte) (*curves.EcdsaSignature, error) {
 	if len(sigBytes) != 64 {
 		return nil, fmt.Errorf("invalid signature length: expected 64 bytes, got %d", len(sigBytes))
 	}
@@ -139,22 +139,22 @@ func deserializeSignature(sigBytes []byte) (*curves.EcdsaSignature, error) {
 	}, nil
 }
 
-func userSignFunc(k *EnclaveData, bz []byte) (SignFunc, error) {
+func GetAliceSignFunc(k *EnclaveData, bz []byte) (SignFunc, error) {
+	curve := k.Curve.Curve()
+	return dklsv1.NewAliceSign(curve, sha3.New256(), bz, k.ValShare, protocol.Version1)
+}
+
+func GetAliceRefreshFunc(k *EnclaveData) (RefreshFunc, error) {
+	curve := k.Curve.Curve()
+	return dklsv1.NewAliceRefresh(curve, k.ValShare, protocol.Version1)
+}
+
+func GetBobSignFunc(k *EnclaveData, bz []byte) (SignFunc, error) {
 	curve := curves.K256()
 	return dklsv1.NewBobSign(curve, sha3.New256(), bz, k.UserShare, protocol.Version1)
 }
 
-func userRefreshFunc(k *EnclaveData) (RefreshFunc, error) {
+func GetBobRefreshFunc(k *EnclaveData) (RefreshFunc, error) {
 	curve := curves.K256()
 	return dklsv1.NewBobRefresh(curve, k.UserShare, protocol.Version1)
-}
-
-func valSignFunc(k *EnclaveData, bz []byte) (SignFunc, error) {
-	curve := curves.K256()
-	return dklsv1.NewAliceSign(curve, sha3.New256(), bz, k.ValShare, protocol.Version1)
-}
-
-func valRefreshFunc(k *EnclaveData) (RefreshFunc, error) {
-	curve := curves.K256()
-	return dklsv1.NewAliceRefresh(curve, k.ValShare, protocol.Version1)
 }

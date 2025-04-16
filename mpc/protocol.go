@@ -1,18 +1,17 @@
 package mpc
 
 import (
-	"github.com/sonr-io/crypto/core/curves"
 	"github.com/sonr-io/crypto/core/protocol"
 	"github.com/sonr-io/crypto/tecdsa/dklsv1"
 )
 
 // NewEnclave generates a new MPC keyshare
 func NewEnclave() (Enclave, error) {
-	curve := curves.K256()
+	curve := K256Name.Curve()
 	valKs := dklsv1.NewAliceDkg(curve, protocol.Version1)
 	userKs := dklsv1.NewBobDkg(curve, protocol.Version1)
 	aErr, bErr := RunProtocol(userKs, valKs)
-	if err := checkIteratedErrors(aErr, bErr); err != nil {
+	if err := CheckIteratedErrors(aErr, bErr); err != nil {
 		return nil, err
 	}
 	valRes, err := valKs.Result(protocol.Version1)
@@ -23,14 +22,13 @@ func NewEnclave() (Enclave, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	return ImportEnclave(WithInitialShares(valRes, userRes))
+	return ImportEnclave(WithInitialShares(valRes, userRes), WithCurveName(K256Name))
 }
 
 // ExecuteSigning runs the MPC signing protocol
 func ExecuteSigning(signFuncVal SignFunc, signFuncUser SignFunc) ([]byte, error) {
 	aErr, bErr := RunProtocol(signFuncVal, signFuncUser)
-	if err := checkIteratedErrors(aErr, bErr); err != nil {
+	if err := CheckIteratedErrors(aErr, bErr); err != nil {
 		return nil, err
 	}
 	out, err := signFuncUser.Result(protocol.Version1)
@@ -51,7 +49,7 @@ func ExecuteSigning(signFuncVal SignFunc, signFuncUser SignFunc) ([]byte, error)
 // ExecuteRefresh runs the MPC refresh protocol
 func ExecuteRefresh(refreshFuncVal RefreshFunc, refreshFuncUser RefreshFunc, nonce []byte) (Enclave, error) {
 	aErr, bErr := RunProtocol(refreshFuncVal, refreshFuncUser)
-	if err := checkIteratedErrors(aErr, bErr); err != nil {
+	if err := CheckIteratedErrors(aErr, bErr); err != nil {
 		return nil, err
 	}
 	valRefreshResult, err := refreshFuncVal.Result(protocol.Version1)

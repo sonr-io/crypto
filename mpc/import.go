@@ -12,25 +12,28 @@ func ImportEnclave(options ...ImportOption) (Enclave, error) {
 		return nil, errors.New("no import options provided")
 	}
 
-	opts := importOptions{}
+	opts := Options{}
 	for _, opt := range options {
 		opts = opt(opts)
 	}
 	return opts.Apply()
 }
 
-type importOptions struct {
+// Options is a struct that holds the import options
+type Options struct {
 	valKeyshare   Message
 	userKeyshare  Message
 	enclaveBytes  []byte
 	initialShares bool
+	curve         CurveName
 }
 
-type ImportOption func(importOptions) importOptions
+// ImportOption is a function that modifies the import options
+type ImportOption func(Options) Options
 
 // WithInitialShares creates an option to import an enclave from validator and user keyshares.
 func WithInitialShares(valKeyshare Message, userKeyshare Message) ImportOption {
-	return func(opts importOptions) importOptions {
+	return func(opts Options) Options {
 		opts.valKeyshare = valKeyshare
 		opts.userKeyshare = userKeyshare
 		opts.initialShares = true
@@ -40,20 +43,28 @@ func WithInitialShares(valKeyshare Message, userKeyshare Message) ImportOption {
 
 // WithEnclaveJSON creates an option to import an enclave from serialized bytes.
 func WithEnclaveJSON(enclaveBytes []byte) ImportOption {
-	return func(opts importOptions) importOptions {
+	return func(opts Options) Options {
 		opts.enclaveBytes = enclaveBytes
 		opts.initialShares = false
 		return opts
 	}
 }
 
-func (opts importOptions) Apply() (Enclave, error) {
+// WithCurveName creates an option to import an enclave from serialized bytes.
+func WithCurveName(curveName CurveName) ImportOption {
+	return func(opts Options) Options {
+		opts.curve = curveName
+		return opts
+	}
+}
+
+func (opts Options) Apply() (Enclave, error) {
 	// First try to restore from enclave bytes if provided
 	if !opts.initialShares {
 		if len(opts.enclaveBytes) == 0 {
 			return nil, errors.New("enclave bytes cannot be empty")
 		}
-		return restoreEnclave(opts.enclaveBytes)
+		return RestoreEnclave(opts.enclaveBytes)
 	} else {
 		// Then try to build from keyshares
 		if opts.valKeyshare == nil {
@@ -62,12 +73,12 @@ func (opts importOptions) Apply() (Enclave, error) {
 		if opts.userKeyshare == nil {
 			return nil, errors.New("user share cannot be nil")
 		}
-		return buildEnclave(opts.valKeyshare, opts.userKeyshare)
+		return BuildEnclave(opts.valKeyshare, opts.userKeyshare, opts)
 	}
 }
 
-// buildEnclave creates a new enclave from validator and user keyshares.
-func buildEnclave(valShare, userShare Message) (Enclave, error) {
+// BuildEnclave creates a new enclave from validator and user keyshares.
+func BuildEnclave(valShare, userShare Message, options Options) (Enclave, error) {
 	if valShare == nil {
 		return nil, errors.New("validator share cannot be nil")
 	}
@@ -75,21 +86,22 @@ func buildEnclave(valShare, userShare Message) (Enclave, error) {
 		return nil, errors.New("user share cannot be nil")
 	}
 
-	pubPoint, err := getAlicePubPoint(valShare)
+	pubPoint, err := GetAlicePublicPoint(valShare)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get public point: %w", err)
 	}
-
 	return &EnclaveData{
 		PubPoint:  pubPoint,
+		PubBytes:  pubPoint.ToAffineUncompressed(),
 		ValShare:  valShare,
 		UserShare: userShare,
 		Nonce:     randNonce(),
+		Curve:     options.curve,
 	}, nil
 }
 
-// restoreEnclave deserializes an enclave from its binary representation.
-func restoreEnclave(data []byte) (Enclave, error) {
+// RestoreEnclave deserializes an enclave from its binary representation.
+func RestoreEnclave(data []byte) (Enclave, error) {
 	if len(data) == 0 {
 		return nil, errors.New("enclave bytes cannot be empty")
 	}

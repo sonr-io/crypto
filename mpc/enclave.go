@@ -4,6 +4,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 
@@ -18,11 +19,22 @@ type EnclaveData struct {
 	ValShare  Message      `json:"val_share"`
 	UserShare Message      `json:"user_share"`
 	Nonce     []byte       `json:"nonce"`
+	Curve     CurveName    `json:"curve"`
+}
+
+// GetData returns the data of the keyEnclave
+func (k *EnclaveData) GetData() *EnclaveData {
+	return k
+}
+
+// PubKeyHex returns the public key of the keyEnclave
+func (k *EnclaveData) PubKeyHex() string {
+	return hex.EncodeToString(k.PubBytes)
 }
 
 // Decrypt returns decrypted enclave data
 func (k *EnclaveData) Decrypt(key []byte, encryptedData []byte) ([]byte, error) {
-	hashedKey := hashKey(key)
+	hashedKey := GetHashKey(key)
 	block, err := aes.NewCipher(hashedKey)
 	if err != nil {
 		return nil, err
@@ -49,7 +61,7 @@ func (k *EnclaveData) Encrypt(key []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to serialize enclave: %w", err)
 	}
 
-	hashedKey := hashKey(key)
+	hashedKey := GetHashKey(key)
 	block, err := aes.NewCipher(hashedKey)
 	if err != nil {
 		return nil, err
@@ -70,11 +82,11 @@ func (k *EnclaveData) IsValid() bool {
 
 // Refresh returns a new keyEnclave
 func (k *EnclaveData) Refresh() (Enclave, error) {
-	refreshFuncVal, err := valRefreshFunc(k)
+	refreshFuncVal, err := GetAliceRefreshFunc(k)
 	if err != nil {
 		return nil, err
 	}
-	refreshFuncUser, err := userRefreshFunc(k)
+	refreshFuncUser, err := GetBobRefreshFunc(k)
 	if err != nil {
 		return nil, err
 	}
@@ -83,11 +95,11 @@ func (k *EnclaveData) Refresh() (Enclave, error) {
 
 // Sign returns the signature of the data
 func (k *EnclaveData) Sign(data []byte) ([]byte, error) {
-	userSign, err := userSignFunc(k, data)
+	userSign, err := GetBobSignFunc(k, data)
 	if err != nil {
 		return nil, err
 	}
-	valSign, err := valSignFunc(k, data)
+	valSign, err := GetAliceSignFunc(k, data)
 	if err != nil {
 		return nil, err
 	}
@@ -96,11 +108,11 @@ func (k *EnclaveData) Sign(data []byte) ([]byte, error) {
 
 // Verify returns true if the signature is valid
 func (k *EnclaveData) Verify(data []byte, sig []byte) (bool, error) {
-	edSig, err := deserializeSignature(sig)
+	edSig, err := DeserializeSignature(sig)
 	if err != nil {
 		return false, err
 	}
-	ePub, err := getEcdsaPoint(k.PubPoint.ToAffineUncompressed())
+	ePub, err := GetECDSAPoint(k.PubPoint.ToAffineUncompressed())
 	if err != nil {
 		return false, err
 	}
@@ -131,7 +143,7 @@ func (k *EnclaveData) Deserialize(data []byte) error {
 		return err
 	}
 	// Reconstruct Point from bytes
-	curve := curves.K256()
+	curve := k.Curve.Curve()
 	point, err := curve.NewIdentityPoint().FromAffineCompressed(k.PubBytes)
 	if err != nil {
 		return err

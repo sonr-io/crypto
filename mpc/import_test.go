@@ -17,7 +17,7 @@ func TestImportEnclave(t *testing.T) {
 	valKs := dklsv1.NewAliceDkg(curve, protocol.Version1)
 	userKs := dklsv1.NewBobDkg(curve, protocol.Version1)
 	aErr, bErr := RunProtocol(userKs, valKs)
-	if err := checkIteratedErrors(aErr, bErr); err != nil {
+	if err := CheckIteratedErrors(aErr, bErr); err != nil {
 		require.NoError(t, err)
 	}
 	mockValShare, err := valKs.Result(protocol.Version1)
@@ -29,7 +29,12 @@ func TestImportEnclave(t *testing.T) {
 	}
 
 	// Create a mock enclave for testing
-	mockEnclave, err := buildEnclave(mockValShare, mockUserShare)
+	mockEnclave, err := BuildEnclave(mockValShare, mockUserShare, Options{
+		curve:         K256Name,
+		userKeyshare:  mockUserShare,
+		valKeyshare:   mockValShare,
+		initialShares: true,
+	})
 	require.NoError(t, err)
 
 	// Serialize the enclave
