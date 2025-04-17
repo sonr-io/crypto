@@ -96,7 +96,7 @@ func (k *EnclaveData) Refresh() (Enclave, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ExecuteRefresh(refreshFuncVal, refreshFuncUser, k.Nonce)
+	return ExecuteRefresh(refreshFuncVal, refreshFuncUser, k.Curve)
 }
 
 // Sign returns the signature of the data

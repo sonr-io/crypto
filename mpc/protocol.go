@@ -22,7 +22,7 @@ func NewEnclave() (Enclave, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ImportEnclave(WithInitialShares(valRes, userRes), WithCurveName(K256Name))
+	return ImportEnclave(WithInitialShares(valRes, userRes, K256Name))
 }
 
 // ExecuteSigning runs the MPC signing protocol
@@ -47,7 +47,7 @@ func ExecuteSigning(signFuncVal SignFunc, signFuncUser SignFunc) ([]byte, error)
 }
 
 // ExecuteRefresh runs the MPC refresh protocol
-func ExecuteRefresh(refreshFuncVal RefreshFunc, refreshFuncUser RefreshFunc, nonce []byte) (Enclave, error) {
+func ExecuteRefresh(refreshFuncVal RefreshFunc, refreshFuncUser RefreshFunc, curve CurveName) (Enclave, error) {
 	aErr, bErr := RunProtocol(refreshFuncVal, refreshFuncUser)
 	if err := CheckIteratedErrors(aErr, bErr); err != nil {
 		return nil, err
@@ -60,7 +60,7 @@ func ExecuteRefresh(refreshFuncVal RefreshFunc, refreshFuncUser RefreshFunc, non
 	if err != nil {
 		return nil, err
 	}
-	return ImportEnclave(WithInitialShares(valRefreshResult, userRefreshResult))
+	return ImportEnclave(WithInitialShares(valRefreshResult, userRefreshResult, curve))
 }
 
 // For DKG bob starts first. For refresh and sign, Alice starts first.

@@ -32,11 +32,12 @@ type Options struct {
 type ImportOption func(Options) Options
 
 // WithInitialShares creates an option to import an enclave from validator and user keyshares.
-func WithInitialShares(valKeyshare Message, userKeyshare Message) ImportOption {
+func WithInitialShares(valKeyshare Message, userKeyshare Message, curve CurveName) ImportOption {
 	return func(opts Options) Options {
 		opts.valKeyshare = valKeyshare
 		opts.userKeyshare = userKeyshare
 		opts.initialShares = true
+		opts.curve = curve
 		return opts
 	}
 }
@@ -46,14 +47,6 @@ func WithEnclaveJSON(enclaveBytes []byte) ImportOption {
 	return func(opts Options) Options {
 		opts.enclaveBytes = enclaveBytes
 		opts.initialShares = false
-		return opts
-	}
-}
-
-// WithCurveName creates an option to import an enclave from serialized bytes.
-func WithCurveName(curveName CurveName) ImportOption {
-	return func(opts Options) Options {
-		opts.curve = curveName
 		return opts
 	}
 }
