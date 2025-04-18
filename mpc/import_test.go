@@ -56,7 +56,7 @@ func TestImportEnclave(t *testing.T) {
 		{
 			name: "With valid shares",
 			options: []ImportOption{
-				WithInitialShares(mockValShare, mockUserShare),
+				WithInitialShares(mockValShare, mockUserShare, K256Name),
 			},
 			expectError: false,
 		},
@@ -70,7 +70,7 @@ func TestImportEnclave(t *testing.T) {
 		{
 			name: "With both shares and bytes (bytes take priority)",
 			options: []ImportOption{
-				WithInitialShares(mockValShare, mockUserShare),
+				WithInitialShares(mockValShare, mockUserShare, K256Name),
 				WithEnclaveJSON(mockEnclaveBytes),
 			},
 			expectError: false,
@@ -78,7 +78,7 @@ func TestImportEnclave(t *testing.T) {
 		{
 			name: "With nil val share",
 			options: []ImportOption{
-				WithInitialShares(nil, mockUserShare),
+				WithInitialShares(nil, mockUserShare, K256Name),
 			},
 			expectError: true,
 			errorMsg:    "validator share cannot be nil",
@@ -86,7 +86,7 @@ func TestImportEnclave(t *testing.T) {
 		{
 			name: "With nil user share",
 			options: []ImportOption{
-				WithInitialShares(mockValShare, nil),
+				WithInitialShares(mockValShare, nil, K256Name),
 			},
 			expectError: true,
 			errorMsg:    "user share cannot be nil",
