@@ -38,6 +38,12 @@ func (k *EnclaveData) PubKeyHex() string {
 	return hex.EncodeToString(k.PubBytes)
 }
 
+// PubKeyBytes returns the public key of the keyEnclave
+func (k *EnclaveData) PubKeyBytes() []byte {
+	k.PubBytes = k.PubPoint.ToAffineCompressed()
+	return k.PubBytes
+}
+
 // Decrypt returns decrypted enclave data
 func (k *EnclaveData) Decrypt(key []byte, encryptedData []byte) ([]byte, error) {
 	hashedKey := GetHashKey(key)
