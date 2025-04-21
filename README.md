@@ -25,6 +25,10 @@ the following URL in your browser:
 
 http://localhost:6060/pkg/github.com/sonr-io/crypto/
 
+## Repo Stats
+
+![Alt](https://repobeats.axiom.co/api/embed/83efbf649c8d5566e064dc277ab0b7f34ee1846e.svg "Repobeats analytics image")
+
 ## Developer Setup
 
 **Prerequisites**: `golang 1.22+`, `make`
