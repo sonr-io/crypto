@@ -39,4 +39,8 @@ proto-publish:
 	@echo "Publishing Protobuf files to buf.build..."
 	@cd $(PROTO_DIR) && buf push
 
+publish-signer:
+	@echo "Publishing signer..."
+	@$(MAKE) -C mpc/signer publish
+
 all: proto-gen
