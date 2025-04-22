@@ -2,15 +2,11 @@ package mpc
 
 import (
 	"bytes"
-	"crypto/ecdsa"
-	"crypto/rand"
 	"encoding/hex"
 	"testing"
 
-	"github.com/sonr-io/crypto/core/curves"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/crypto/sha3"
 )
 
 func TestEnclaveData_GetData(t *testing.T) {
@@ -162,7 +158,7 @@ func TestEnclaveData_IsValid(t *testing.T) {
 		PubHex:   "invalid",
 		PubBytes: []byte("invalid"),
 		Nonce:    []byte("nonce"),
-		Curve:    K256,
+		Curve:    K256Name,
 	}
 
 	// Verify it's invalid

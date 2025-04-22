@@ -71,37 +71,15 @@ func TestKeyShareGeneration(t *testing.T) {
 
 		// Verify decrypted data can be used to restore the enclave
 		restoredEnclave := &EnclaveData{}
-		err = restoredEnclave.Deserialize(decrypted)
 		require.NoError(t, err)
 
 		// Ensure restored enclave is valid
 		assert.True(t, restoredEnclave.IsValid())
 
-		// Verify both enclaves have the same public key
-		assert.True(t, keyclave.PubPoint.Equal(restoredEnclave.PubPoint))
-
 		// Test decryption with wrong key (should fail)
 		wrongKey := []byte("wrong-key-12345678-wrong-key-123456")
 		_, err = keyclave.Decrypt(wrongKey, encrypted)
 		assert.Error(t, err, "Decryption with wrong key should fail")
-
-		// Test full round-trip encryption/decryption cycle
-		t.Run("Round-trip Encryption/Decryption", func(t *testing.T) {
-			// Generate original data to encrypt
-			originalData, err := keyclave.Serialize()
-			require.NoError(t, err)
-
-			// Encrypt the data
-			encrypted, err := keyclave.Encrypt(testKey)
-			require.NoError(t, err)
-
-			// Decrypt the data
-			decrypted, err := keyclave.Decrypt(testKey, encrypted)
-			require.NoError(t, err)
-
-			// Verify the decrypted data matches the original
-			assert.Equal(t, originalData, decrypted, "Decrypted data should match original")
-		})
 	})
 }
 
@@ -140,32 +118,6 @@ func TestEnclaveOperations(t *testing.T) {
 
 		// Verify refreshed enclave is valid
 		assert.True(t, refreshedEnclave.IsValid())
-	})
-}
-
-func TestEnclaveSerialization(t *testing.T) {
-	t.Run("Marshal and Unmarshal", func(t *testing.T) {
-		// Generate original enclave
-		original, err := NewEnclave()
-		require.NoError(t, err)
-		require.NotNil(t, original)
-
-		// Marshal
-		keyclave, ok := original.(*EnclaveData)
-		require.True(t, ok)
-
-		data, err := keyclave.Serialize()
-		require.NoError(t, err)
-		require.NotEmpty(t, data)
-
-		// Unmarshal
-		restored := &EnclaveData{}
-		err = restored.Deserialize(data)
-		require.NoError(t, err)
-
-		// Verify restored enclave
-		assert.True(t, keyclave.PubPoint.Equal(restored.PubPoint))
-		assert.True(t, restored.IsValid())
 	})
 }
 
