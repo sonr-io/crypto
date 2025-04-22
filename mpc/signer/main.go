@@ -24,11 +24,13 @@ func sign() int32 {
 		pdk.Log(pdk.LogError, err.Error())
 		return 1
 	}
+	pdk.Log(pdk.LogInfo, "Deserialized request successfully")
 	e, err := mpc.ImportEnclave(mpc.WithEnclaveJSON(req.Enclave))
 	if err != nil {
 		pdk.Log(pdk.LogError, err.Error())
 		return 1
 	}
+	pdk.Log(pdk.LogInfo, "Imported enclave successfully")
 	sig, err := e.Sign(req.Message)
 	if err != nil {
 		pdk.Log(pdk.LogError, err.Error())

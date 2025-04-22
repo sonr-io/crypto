@@ -5,37 +5,36 @@ import (
 	"github.com/sonr-io/crypto/mpc"
 )
 
-type SignRequest struct {
+type VerifyRequest struct {
+	PubKey  []byte `json:"pub_key"`
 	Message []byte `json:"message"`
-	Enclave []byte `json:"enclave"`
+	Sig     []byte `json:"sig"`
 }
 
-type SignResponse struct {
-	Signature []byte `json:"signature"`
+type VerifyResponse struct {
+	Valid bool `json:"valid"`
+	Error string
 }
 
 func main() {}
 
-//go:wasmexport sign
-func sign() int32 {
-	req := SignRequest{}
+//go:wasmexport verify
+func verify() int32 {
+	req := VerifyRequest{}
 	err := pdk.InputJSON(req)
 	if err != nil {
 		pdk.Log(pdk.LogError, err.Error())
 		return 1
 	}
-	e, err := mpc.ImportEnclave(mpc.WithEnclaveJSON(req.Enclave))
+	pdk.Log(pdk.LogInfo, "Deserialized request successfully")
+	res := VerifyResponse{}
+	valid, err := mpc.VerifyWithPubKey(req.PubKey, req.Message, req.Sig)
 	if err != nil {
-		pdk.Log(pdk.LogError, err.Error())
-		return 1
-	}
-	sig, err := e.Sign(req.Message)
-	if err != nil {
-		pdk.Log(pdk.LogError, err.Error())
-		return 1
+		res.Error = err.Error()
+		res.Valid = false
 	}
 	pdk.Log(pdk.LogInfo, "Signature successful")
-	sigJSON := SignResponse{Signature: sig}
-	pdk.OutputJSON(sigJSON)
+	res.Valid = valid
+	pdk.OutputJSON(res)
 	return 0
 }

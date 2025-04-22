@@ -15,7 +15,8 @@ import (
 // EnclaveData implements the Enclave interface
 type EnclaveData struct {
 	PubPoint  curves.Point `json:"-"`
-	PubBytes  []byte       `json:"pub_key"`
+	PubHex    string       `json:"pub_hex"`   // PubHex is the hex-encoded compressed public key
+	PubBytes  []byte       `json:"pub_bytes"` // PubBytes is the uncompressed public key
 	ValShare  Message      `json:"val_share"`
 	UserShare Message      `json:"user_share"`
 	Nonce     []byte       `json:"nonce"`
@@ -34,13 +35,13 @@ func (k *EnclaveData) GetEnclave() Enclave {
 
 // PubKeyHex returns the public key of the keyEnclave
 func (k *EnclaveData) PubKeyHex() string {
-	k.PubBytes = k.PubPoint.ToAffineCompressed()
-	return hex.EncodeToString(k.PubBytes)
+	k.PubHex = hex.EncodeToString(k.PubPoint.ToAffineCompressed())
+	return k.PubHex
 }
 
 // PubKeyBytes returns the public key of the keyEnclave
 func (k *EnclaveData) PubKeyBytes() []byte {
-	k.PubBytes = k.PubPoint.ToAffineCompressed()
+	k.PubBytes = k.PubPoint.ToAffineUncompressed()
 	return k.PubBytes
 }
 
@@ -62,7 +63,6 @@ func (k *EnclaveData) Decrypt(key []byte, encryptedData []byte) ([]byte, error) 
 	if err != nil {
 		return nil, fmt.Errorf("decryption failed: %w", err)
 	}
-
 	return plaintext, nil
 }
 
@@ -145,7 +145,8 @@ func (k *EnclaveData) Verify(data []byte, sig []byte) (bool, error) {
 // Marshal returns the JSON encoding of keyEnclave
 func (k *EnclaveData) Serialize() ([]byte, error) {
 	// Store compressed public point bytes before marshaling
-	k.PubBytes = k.PubPoint.ToAffineCompressed()
+	k.PubHex = hex.EncodeToString(k.PubPoint.ToAffineCompressed())
+	k.PubBytes = k.PubPoint.ToAffineUncompressed()
 	return json.Marshal(k)
 }
 
@@ -156,7 +157,7 @@ func (k *EnclaveData) Deserialize(data []byte) error {
 	}
 	// Reconstruct Point from bytes
 	curve := k.Curve.Curve()
-	point, err := curve.NewIdentityPoint().FromAffineCompressed(k.PubBytes)
+	point, err := curve.NewIdentityPoint().FromAffineUncompressed(k.PubBytes)
 	if err != nil {
 		return err
 	}
