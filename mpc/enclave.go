@@ -4,7 +4,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 
@@ -14,13 +13,12 @@ import (
 
 // EnclaveData implements the Enclave interface
 type EnclaveData struct {
-	PubPoint  curves.Point `json:"-"`
-	PubHex    string       `json:"pub_hex"`   // PubHex is the hex-encoded compressed public key
-	PubBytes  []byte       `json:"pub_bytes"` // PubBytes is the uncompressed public key
-	ValShare  Message      `json:"val_share"`
-	UserShare Message      `json:"user_share"`
-	Nonce     []byte       `json:"nonce"`
-	Curve     CurveName    `json:"curve"`
+	PubHex    string    `json:"pub_hex"`   // PubHex is the hex-encoded compressed public key
+	PubBytes  []byte    `json:"pub_bytes"` // PubBytes is the uncompressed public key
+	ValShare  Message   `json:"val_share"`
+	UserShare Message   `json:"user_share"`
+	Nonce     []byte    `json:"nonce"`
+	Curve     CurveName `json:"curve"`
 }
 
 // GetData returns the data of the keyEnclave
@@ -33,15 +31,19 @@ func (k *EnclaveData) GetEnclave() Enclave {
 	return k
 }
 
+// GetPubPoint returns the public point of the keyEnclave
+func (k *EnclaveData) GetPubPoint() (curves.Point, error) {
+	curve := k.Curve.Curve()
+	return curve.NewIdentityPoint().FromAffineUncompressed(k.PubBytes)
+}
+
 // PubKeyHex returns the public key of the keyEnclave
 func (k *EnclaveData) PubKeyHex() string {
-	k.PubHex = hex.EncodeToString(k.PubPoint.ToAffineCompressed())
 	return k.PubHex
 }
 
 // PubKeyBytes returns the public key of the keyEnclave
 func (k *EnclaveData) PubKeyBytes() []byte {
-	k.PubBytes = k.PubPoint.ToAffineUncompressed()
 	return k.PubBytes
 }
 
@@ -68,7 +70,7 @@ func (k *EnclaveData) Decrypt(key []byte, encryptedData []byte) ([]byte, error) 
 
 // Export returns encrypted enclave data
 func (k *EnclaveData) Encrypt(key []byte) ([]byte, error) {
-	data, err := k.Serialize()
+	data, err := k.Marshal()
 	if err != nil {
 		return nil, fmt.Errorf("failed to serialize enclave: %w", err)
 	}
@@ -89,7 +91,7 @@ func (k *EnclaveData) Encrypt(key []byte) ([]byte, error) {
 
 // IsValid returns true if the keyEnclave is valid
 func (k *EnclaveData) IsValid() bool {
-	return k.PubPoint != nil && k.ValShare != nil && k.UserShare != nil
+	return k.ValShare != nil && k.UserShare != nil
 }
 
 // Refresh returns a new keyEnclave
@@ -124,7 +126,7 @@ func (k *EnclaveData) Verify(data []byte, sig []byte) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	ePub, err := GetECDSAPoint(k.PubPoint.ToAffineUncompressed())
+	ePub, err := GetECDSAPoint(k.PubBytes)
 	if err != nil {
 		return false, err
 	}
@@ -143,24 +145,14 @@ func (k *EnclaveData) Verify(data []byte, sig []byte) (bool, error) {
 }
 
 // Marshal returns the JSON encoding of keyEnclave
-func (k *EnclaveData) Serialize() ([]byte, error) {
-	// Store compressed public point bytes before marshaling
-	k.PubHex = hex.EncodeToString(k.PubPoint.ToAffineCompressed())
-	k.PubBytes = k.PubPoint.ToAffineUncompressed()
+func (k *EnclaveData) Marshal() ([]byte, error) {
 	return json.Marshal(k)
 }
 
 // Deserialize parses the JSON-encoded data and stores the result
-func (k *EnclaveData) Deserialize(data []byte) error {
+func (k *EnclaveData) Unmarshal(data []byte) error {
 	if err := json.Unmarshal(data, k); err != nil {
 		return err
 	}
-	// Reconstruct Point from bytes
-	curve := k.Curve.Curve()
-	point, err := curve.NewIdentityPoint().FromAffineUncompressed(k.PubBytes)
-	if err != nil {
-		return err
-	}
-	k.PubPoint = point
 	return nil
 }

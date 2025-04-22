@@ -5,7 +5,10 @@ go 1.24.2
 require (
 	github.com/extism/go-pdk v1.1.3
 	github.com/sonr-io/crypto v0.12.1
+	github.com/tetratelabs/wazero v1.9.0
 )
+
+replace github.com/sonr-io/crypto => ../../
 
 require (
 	filippo.io/edwards25519 v1.1.0 // indirect

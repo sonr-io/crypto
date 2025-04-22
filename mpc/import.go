@@ -1,6 +1,7 @@
 package mpc
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 )
@@ -84,8 +85,8 @@ func BuildEnclave(valShare, userShare Message, options Options) (Enclave, error)
 		return nil, fmt.Errorf("failed to get public point: %w", err)
 	}
 	return &EnclaveData{
-		PubPoint:  pubPoint,
-		PubBytes:  pubPoint.ToAffineCompressed(),
+		PubBytes:  pubPoint.ToAffineUncompressed(),
+		PubHex:    hex.EncodeToString(pubPoint.ToAffineCompressed()),
 		ValShare:  valShare,
 		UserShare: userShare,
 		Nonce:     randNonce(),
@@ -100,7 +101,7 @@ func RestoreEnclave(data []byte) (Enclave, error) {
 	}
 
 	keyclave := &EnclaveData{}
-	err := keyclave.Deserialize(data)
+	err := keyclave.Unmarshal(data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal enclave: %w", err)
 	}

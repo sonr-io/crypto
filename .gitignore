@@ -31,3 +31,4 @@ go.work.sum
 
 # Ignore the following files
 # Ignore the following files
+mpc/enclave/enclave.json

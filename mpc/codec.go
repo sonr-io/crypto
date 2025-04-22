@@ -90,7 +90,8 @@ type Enclave interface {
 	PubKeyBytes() []byte                                      // PubKeyBytes returns the public key of the keyEnclave
 	PubKeyHex() string                                        // PubKeyHex returns the public key of the keyEnclave
 	Refresh() (Enclave, error)                                // Refresh returns a new keyEnclave
-	Serialize() ([]byte, error)                               // Serialize returns the serialized keyEnclave
+	Marshal() ([]byte, error)                                 // Serialize returns the serialized keyEnclave
 	Sign(data []byte) ([]byte, error)                         // Sign returns the signature of the data
+	Unmarshal(data []byte) error                              // Verify returns true if the signature is valid
 	Verify(data []byte, sig []byte) (bool, error)             // Verify returns true if the signature is valid
 }

@@ -1,4 +1,4 @@
-.PHONY: build
+.PHONY: build test
 
 all: build publish
 
@@ -7,8 +7,11 @@ tidy:
 	@gum log --level info --time kitchen "[ENCLAVE] Completed go mod tidy successfully."
 
 build: tidy
-	@gum spin --show-error --title "[ENCLAVE] Running tinygo build..." -- sh -c "tinygo build -o enclave.wasm -target wasip1 -buildmode=c-shared ."
-	@gum log --level info --time kitchen "[ENCLAVE] Completed tinygo build successfully."
+	@gum spin --show-error --title "[ENCLAVE] Running go build..." -- sh -c "GOOS=wasip1 GOARCH=wasm go build -buildmode=c-shared -o enclave.wasm main.go"
+	@gum log --level info --time kitchen "[ENCLAVE] Completed go build successfully."
+
+test: build
+	@extism call enclave.wasm generate --wasi >> enclave.json
 
 publish: build
 	@gum spin --show-error --title "[ENCLAVE] Uploading enclave.wasm to r2" -- sh -c "rclone copy ./enclave.wasm r2:cdn/bin/"
