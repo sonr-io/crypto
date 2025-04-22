@@ -26,7 +26,7 @@ func (m *MPCSigningMethod) Alg() string {
 }
 
 // Verify verifies the signature using the MPC public key
-func (m *MPCSigningMethod) Verify(signingString, signature string, key interface{}) error {
+func (m *MPCSigningMethod) Verify(signingString, signature string, key any) error {
 	// // Decode the signature
 	// sig, err := base64.RawURLEncoding.DecodeString(signature)
 	// if err != nil {
@@ -45,7 +45,7 @@ func (m *MPCSigningMethod) Verify(signingString, signature string, key interface
 }
 
 // Sign signs the data using MPC
-func (m *MPCSigningMethod) Sign(signingString string, key interface{}) (string, error) {
+func (m *MPCSigningMethod) Sign(signingString string, key any) (string, error) {
 	// Hash the signing string
 	hasher := sha256.New()
 	hasher.Write([]byte(signingString))

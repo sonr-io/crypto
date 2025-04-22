@@ -1,14 +1,13 @@
-// go:build jwx_es256k
 package spec
 
 import (
 	"fmt"
 	"time"
 
-	"github.com/sonr-io/crypto/keys"
-	"github.com/sonr-io/crypto/ucan"
 	"github.com/cosmos/cosmos-sdk/types/bech32"
 	"github.com/golang-jwt/jwt"
+	"github.com/sonr-io/crypto/keys"
+	"github.com/sonr-io/crypto/ucan"
 )
 
 type (
@@ -94,7 +93,7 @@ func (k ucanKeyshare) newToken(audienceDID string, prf []Proof, att Attenuations
 	}, nil
 }
 
-func getIssuerDID(pk keys.PubKey) (string, string, error) {
+func GetIssuerDID(pk keys.PubKey) (string, string, error) {
 	addr, err := bech32.ConvertAndEncode("idx", pk.Bytes())
 	if err != nil {
 		return "", "", err
