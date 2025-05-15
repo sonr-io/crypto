@@ -3,7 +3,7 @@
 PROTO_DIR = ./proto
 
 build:
-	@earthly +signer
+	@make -C mpc all
 
 # Generate protobuf files
 proto-gen:
