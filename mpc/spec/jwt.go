@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/sonr-io/sonr/crypto/mpc"
+	"github.com/sonr-io/crypto/mpc"
 )
 
 // MPCSigningMethod implements the SigningMethod interface for MPC-based signing

@@ -1,8 +1,8 @@
 package mpc
 
 import (
-	"github.com/sonr-io/sonr/crypto/core/protocol"
-	"github.com/sonr-io/sonr/crypto/tecdsa/dklsv1"
+	"github.com/sonr-io/crypto/core/protocol"
+	"github.com/sonr-io/crypto/tecdsa/dklsv1"
 )
 
 // NewEnclave generates a new MPC keyshare

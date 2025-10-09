@@ -13,7 +13,7 @@ import (
 
 	"golang.org/x/crypto/hkdf"
 
-	"github.com/sonr-io/sonr/crypto/core/curves"
+	"github.com/sonr-io/crypto/core/curves"
 )
 
 // NonceShare represents a share of a generated nonce.

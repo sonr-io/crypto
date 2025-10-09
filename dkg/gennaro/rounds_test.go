@@ -13,8 +13,8 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sonr-io/sonr/crypto/core/curves"
-	v1 "github.com/sonr-io/sonr/crypto/sharing/v1"
+	"github.com/sonr-io/crypto/core/curves"
+	v1 "github.com/sonr-io/crypto/sharing/v1"
 )
 
 func TestParticipantRound1Works(t *testing.T) {

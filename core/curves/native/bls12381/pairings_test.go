@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/sonr-io/sonr/crypto/core/curves/native"
+	"github.com/sonr-io/crypto/core/curves/native"
 )
 
 func TestSinglePairing(t *testing.T) {

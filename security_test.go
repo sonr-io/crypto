@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sonr-io/sonr/crypto/argon2"
-	ecdsaPkg "github.com/sonr-io/sonr/crypto/ecdsa"
-	"github.com/sonr-io/sonr/crypto/password"
-	"github.com/sonr-io/sonr/crypto/wasm"
+	"github.com/sonr-io/crypto/argon2"
+	ecdsaPkg "github.com/sonr-io/crypto/ecdsa"
+	"github.com/sonr-io/crypto/password"
+	"github.com/sonr-io/crypto/wasm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

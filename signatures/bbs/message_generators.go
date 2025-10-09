@@ -9,7 +9,7 @@ package bbs
 import (
 	"errors"
 
-	"github.com/sonr-io/sonr/crypto/core/curves"
+	"github.com/sonr-io/crypto/core/curves"
 )
 
 // MessageGenerators are used to sign a vector of commitments for

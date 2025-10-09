@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/sonr-io/sonr/crypto/core/curves"
+	"github.com/sonr-io/crypto/core/curves"
 	"golang.org/x/crypto/sha3"
 )
 

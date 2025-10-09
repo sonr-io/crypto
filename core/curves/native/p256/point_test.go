@@ -6,10 +6,10 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/sonr-io/sonr/crypto/core/curves"
-	"github.com/sonr-io/sonr/crypto/core/curves/native"
-	"github.com/sonr-io/sonr/crypto/core/curves/native/p256"
-	"github.com/sonr-io/sonr/crypto/core/curves/native/p256/fp"
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/core/curves/native"
+	"github.com/sonr-io/crypto/core/curves/native/p256"
+	"github.com/sonr-io/crypto/core/curves/native/p256/fp"
 )
 
 func TestP256PointArithmetic_Double(t *testing.T) {

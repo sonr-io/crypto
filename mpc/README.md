@@ -42,7 +42,7 @@ The package is built around the concept of secure **Enclaves** that manage distr
 ### Installation
 
 ```bash
-go get github.com/sonr-io/sonr/crypto/mpc
+go get github.com/sonr-io/crypto/mpc
 ```
 
 ### Basic Usage
@@ -54,7 +54,7 @@ package main
 
 import (
     "fmt"
-    "github.com/sonr-io/sonr/crypto/mpc"
+    "github.com/sonr-io/crypto/mpc"
 )
 
 func main() {
@@ -233,7 +233,7 @@ if err != nil {
 The package includes MPC-based JWT signing for UCAN tokens:
 
 ```go
-import "github.com/sonr-io/sonr/crypto/mpc/spec"
+import "github.com/sonr-io/crypto/mpc/spec"
 
 // Create MPC-backed UCAN token source
 // (Implementation details in spec package)
@@ -448,10 +448,10 @@ go test -cover ./crypto/mpc
 
 ## Dependencies
 
-- **Core Cryptography**: `github.com/sonr-io/sonr/crypto/core/curves`
-- **Protocol Framework**: `github.com/sonr-io/sonr/crypto/core/protocol`
-- **Threshold ECDSA**: `github.com/sonr-io/sonr/crypto/tecdsa/dklsv1`
-- **UCAN Integration**: `github.com/sonr-io/sonr/crypto/ucan`
+- **Core Cryptography**: `github.com/sonr-io/crypto/core/curves`
+- **Protocol Framework**: `github.com/sonr-io/crypto/core/protocol`
+- **Threshold ECDSA**: `github.com/sonr-io/crypto/tecdsa/dklsv1`
+- **UCAN Integration**: `github.com/sonr-io/crypto/ucan`
 - **Standard Crypto**: `golang.org/x/crypto/sha3`
 - **JWT Support**: `github.com/golang-jwt/jwt`
 

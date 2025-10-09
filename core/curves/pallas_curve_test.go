@@ -12,8 +12,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/sonr-io/sonr/crypto/core/curves/native/pasta/fp"
-	"github.com/sonr-io/sonr/crypto/core/curves/native/pasta/fq"
+	"github.com/sonr-io/crypto/core/curves/native/pasta/fp"
+	"github.com/sonr-io/crypto/core/curves/native/pasta/fq"
 )
 
 func TestPointPallasAddDoubleMul(t *testing.T) {

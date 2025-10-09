@@ -9,7 +9,7 @@ package common
 import (
 	"io"
 
-	"github.com/sonr-io/sonr/crypto/core/curves"
+	"github.com/sonr-io/crypto/core/curves"
 )
 
 // ProofMessage classifies how a message is presented in a proof

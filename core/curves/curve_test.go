@@ -7,7 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/sonr-io/sonr/crypto/core"
+	"github.com/sonr-io/crypto/core"
 )
 
 // TestAdditionalCurveSupport tests the new curve support in hash.go

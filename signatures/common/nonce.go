@@ -7,7 +7,7 @@
 package common
 
 import (
-	"github.com/sonr-io/sonr/crypto/core/curves"
+	"github.com/sonr-io/crypto/core/curves"
 )
 
 // Nonce is used for zero-knowledge proofs to prevent replay attacks

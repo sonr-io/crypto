@@ -10,8 +10,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/sonr-io/sonr/crypto/core/curves"
-	"github.com/sonr-io/sonr/crypto/signatures/common"
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/signatures/common"
 )
 
 // BlindSignature is a BBS+ blind signature

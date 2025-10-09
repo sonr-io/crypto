@@ -10,9 +10,9 @@ package frost
 import (
 	"strconv"
 
-	"github.com/sonr-io/sonr/crypto/core/curves"
-	"github.com/sonr-io/sonr/crypto/internal"
-	"github.com/sonr-io/sonr/crypto/sharing"
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/internal"
+	"github.com/sonr-io/crypto/sharing"
 )
 
 type DkgParticipant struct {

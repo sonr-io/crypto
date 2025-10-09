@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/sonr-io/sonr/crypto/keys"
-	"github.com/sonr-io/sonr/crypto/mpc"
+	"github.com/sonr-io/crypto/keys"
+	"github.com/sonr-io/crypto/mpc"
 	"lukechampine.com/blake3"
 )
 

@@ -13,11 +13,11 @@ import (
 	"math/big"
 	"sync"
 
-	"github.com/sonr-io/sonr/crypto/core/curves/native"
-	p256n "github.com/sonr-io/sonr/crypto/core/curves/native/p256"
-	"github.com/sonr-io/sonr/crypto/core/curves/native/p256/fp"
-	"github.com/sonr-io/sonr/crypto/core/curves/native/p256/fq"
-	"github.com/sonr-io/sonr/crypto/internal"
+	"github.com/sonr-io/crypto/core/curves/native"
+	p256n "github.com/sonr-io/crypto/core/curves/native/p256"
+	"github.com/sonr-io/crypto/core/curves/native/p256/fp"
+	"github.com/sonr-io/crypto/core/curves/native/p256/fq"
+	"github.com/sonr-io/crypto/internal"
 )
 
 var (

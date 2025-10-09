@@ -13,7 +13,7 @@ import (
 
 	"github.com/cosmos/btcutil/base58"
 
-	"github.com/sonr-io/sonr/crypto/core/curves"
+	"github.com/sonr-io/crypto/core/curves"
 )
 
 // Transaction is a Mina transaction for payments or delegations

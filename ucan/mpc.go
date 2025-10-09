@@ -12,8 +12,8 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/ipfs/go-cid"
 	"github.com/multiformats/go-multihash"
-	"github.com/sonr-io/sonr/crypto/keys"
-	"github.com/sonr-io/sonr/crypto/mpc"
+	"github.com/sonr-io/crypto/keys"
+	"github.com/sonr-io/crypto/mpc"
 )
 
 // MPCSigningMethod implements JWT signing using MPC enclaves

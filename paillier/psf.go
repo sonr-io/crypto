@@ -12,9 +12,9 @@ import (
 	"fmt"
 	"math/big"
 
-	crypto "github.com/sonr-io/sonr/crypto/core"
-	"github.com/sonr-io/sonr/crypto/core/curves"
-	"github.com/sonr-io/sonr/crypto/internal"
+	crypto "github.com/sonr-io/crypto/core"
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/internal"
 )
 
 // [spec] 10.2 and ProvePSF, VerifyPSF fig.15

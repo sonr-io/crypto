@@ -3,8 +3,8 @@ package bls12381
 import (
 	"io"
 
-	"github.com/sonr-io/sonr/crypto/core/curves/native"
-	"github.com/sonr-io/sonr/crypto/internal"
+	"github.com/sonr-io/crypto/core/curves/native"
+	"github.com/sonr-io/crypto/internal"
 )
 
 // GtFieldBytes is the number of bytes needed to represent this field

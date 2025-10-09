@@ -10,8 +10,8 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/sonr-io/sonr/crypto/core/curves"
-	v1 "github.com/sonr-io/sonr/crypto/sharing/v1"
+	"github.com/sonr-io/crypto/core/curves"
+	v1 "github.com/sonr-io/crypto/sharing/v1"
 )
 
 // PublicKeyFromBytes converts byte array into PublicKey byte array

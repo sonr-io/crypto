@@ -15,10 +15,10 @@ import (
 
 	"github.com/pkg/errors"
 
-	"github.com/sonr-io/sonr/crypto/core/curves"
-	"github.com/sonr-io/sonr/crypto/ot/base/simplest"
-	"github.com/sonr-io/sonr/crypto/ot/extension/kos"
-	"github.com/sonr-io/sonr/crypto/tecdsa/dklsv1/dkg"
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/ot/base/simplest"
+	"github.com/sonr-io/crypto/ot/extension/kos"
+	"github.com/sonr-io/crypto/tecdsa/dklsv1/dkg"
 )
 
 // GenerateAndDeal produces private key material for alice and bob which they can later use in signing.

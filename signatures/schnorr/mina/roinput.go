@@ -7,8 +7,8 @@
 package mina
 
 import (
-	"github.com/sonr-io/sonr/crypto/core/curves/native/pasta/fp"
-	"github.com/sonr-io/sonr/crypto/core/curves/native/pasta/fq"
+	"github.com/sonr-io/crypto/core/curves/native/pasta/fp"
+	"github.com/sonr-io/crypto/core/curves/native/pasta/fq"
 )
 
 // Handles the packing of bits and fields according to Mina spec

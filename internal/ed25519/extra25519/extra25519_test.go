@@ -10,7 +10,7 @@ import (
 	"crypto/sha512"
 	"testing"
 
-	"github.com/sonr-io/sonr/crypto/internal/ed25519/edwards25519"
+	"github.com/sonr-io/crypto/internal/ed25519/edwards25519"
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/ed25519"
 )

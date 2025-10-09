@@ -13,9 +13,9 @@ import (
 
 	"golang.org/x/crypto/sha3"
 
-	"github.com/sonr-io/sonr/crypto/core/curves/native"
-	"github.com/sonr-io/sonr/crypto/core/curves/native/bls12381"
-	"github.com/sonr-io/sonr/crypto/internal"
+	"github.com/sonr-io/crypto/core/curves/native"
+	"github.com/sonr-io/crypto/core/curves/native/bls12381"
+	"github.com/sonr-io/crypto/internal"
 )
 
 var bls12381modulus = bhex(

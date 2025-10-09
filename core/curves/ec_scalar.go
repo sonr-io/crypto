@@ -18,9 +18,9 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/bwesterb/go-ristretto"
 
-	"github.com/sonr-io/sonr/crypto/core"
-	"github.com/sonr-io/sonr/crypto/core/curves/native/bls12381"
-	"github.com/sonr-io/sonr/crypto/internal"
+	"github.com/sonr-io/crypto/core"
+	"github.com/sonr-io/crypto/core/curves/native/bls12381"
+	"github.com/sonr-io/crypto/internal"
 )
 
 type EcScalar interface {

@@ -7,7 +7,7 @@
 package common
 
 import (
-	"github.com/sonr-io/sonr/crypto/core/curves"
+	"github.com/sonr-io/crypto/core/curves"
 )
 
 // SignatureBlinding is a value used for computing blind signatures

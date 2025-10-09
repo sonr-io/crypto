@@ -10,7 +10,7 @@ import (
 	"math/big"
 	"sync"
 
-	"github.com/sonr-io/sonr/crypto/core/curves/native"
+	"github.com/sonr-io/crypto/core/curves/native"
 )
 
 var (

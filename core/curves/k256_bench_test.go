@@ -9,8 +9,8 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 
-	mod "github.com/sonr-io/sonr/crypto/core"
-	"github.com/sonr-io/sonr/crypto/internal"
+	mod "github.com/sonr-io/crypto/core"
+	"github.com/sonr-io/crypto/internal"
 )
 
 func BenchmarkK256(b *testing.B) {

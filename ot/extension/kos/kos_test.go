@@ -6,9 +6,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/sonr-io/sonr/crypto/core/curves"
-	"github.com/sonr-io/sonr/crypto/ot/base/simplest"
-	"github.com/sonr-io/sonr/crypto/ot/ottest"
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/ot/base/simplest"
+	"github.com/sonr-io/crypto/ot/ottest"
 )
 
 func TestBinaryMult(t *testing.T) {
