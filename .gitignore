@@ -1,2 +1,10 @@
 # Added by goreleaser init:
 dist/
+Taskfile*
+mprocs*
+CLAUDE.md
+.claude*
+.DS_Store
+
+.opencode
+
