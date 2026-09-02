@@ -1,0 +1,475 @@
+---
+title: BBS+ Signatures
+description: Sign a vector of attributes on BLS12-381, then prove possession of the signature while disclosing only the attributes you choose — plus blind signing so the issuer never sees part of what it signs.
+sidebar:
+  order: 3
+  icon: eye-off
+---
+
+`signatures/bbs` implements the BBS+ signature scheme from
+[eprint 2016/663](https://eprint.iacr.org/2016/663.pdf), section 4.3. A BBS+ signature covers an
+ordered **vector** of scalar messages rather than one byte string, and that is the entire point: the
+holder of a signature can later produce a zero-knowledge proof that says *"an issuer I can name
+signed four attributes; here are attributes 3 and 4; I know the other two but I am not telling
+you"*. The verifier learns nothing about the hidden attributes beyond the fact that they were signed.
+
+This is the credential primitive. Reach for it when you are issuing something like a driver's
+licence or a KYC attestation and the holder must be able to prove "over 21" to a bar without handing
+over a birth date, a licence number, and an address. Do **not** reach for it when you just need to
+sign a document — the machinery is heavy, verification runs pairings, and
+[BLS](/signatures/bls) or ECDSA does that job far more cheaply.
+
+:::danger[Do not deploy this package — message generators collide]
+`MessageGenerators.Get(i)` returns the **same point for every index**. The method copies the internal
+state array, writes the index into the copy, and then hashes the *original* — so the index never
+reaches the hash. Every `H_i` for `i >= 1` is the identical point `h_0.Hash(state)`; only `Get(0)`
+differs, returning `h_0` itself.
+
+The consequence is a trivial forgery: because the signature commits to
+`h_0^s · Π H_i^{m_i}` and all `H_i` are equal, the signature depends only on the **sum** of the
+messages. Any permutation of the signed vector verifies, and so does any different vector with the
+same sum. Verified against this repository:
+
+```
+original verifies:         true
+permuted verifies:         true   // [3,4,5,6] signature accepted for [6,5,4,3]
+same-sum forgery verifies: true   // ...and for [1,2,7,8]
+```
+
+Everything below describes the API as written. Nothing below is safe to rely on for
+unforgeability or for selective disclosure until `signatures/bbs/message_generators.go` hashes the
+mutated local copy. See [security notes](/reference/security).
+:::
+
+## Requirements
+
+BBS+ needs a pairing, so it needs a `*curves.PairingCurve`. In practice that means BLS12-381:
+
+```go
+import (
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/signatures/bbs"
+)
+
+curve := curves.BLS12381(&curves.PointBls12381G2{})
+```
+
+The argument to `curves.BLS12381` chooses which group holds the **public key**. Passing
+`&curves.PointBls12381G2{}` puts the key in G2 and signatures in G1 — the layout every test in the
+package uses. See [the curve abstraction](/foundations/curves) for what `PairingCurve` provides.
+
+Messages are `curves.Scalar`, not bytes. Convert with `curve.Scalar.Hash([]byte("..."))` for
+free-form attributes, or `curve.Scalar.New(n)` for small integers.
+
+## Keys and generators
+
+<TypeTable
+  type={{
+    "NewKeys(curve *curves.PairingCurve)": {
+      type: "(*PublicKey, *SecretKey, error)",
+      description: "Generates a fresh keypair. Note the public key comes FIRST in the return order.",
+    },
+    "NewSecretKey(curve *curves.PairingCurve)": {
+      type: "(*SecretKey, error)",
+      description: "Just the signing key.",
+    },
+    "SecretKey.PublicKey()": {
+      type: "*PublicKey",
+      description: "Derives the verification key. No error return.",
+    },
+    "MessageGenerators.Init(w *PublicKey, length int)": {
+      type: "(*MessageGenerators, error)",
+      description: "Derives `length` message generators plus the blinding generator h0, deterministically from the public key. Errors only on negative length.",
+    },
+    "MessageGenerators.Get(i int)": {
+      type: "curves.PairingPoint",
+      description: "i <= 0 returns h0, the blinding generator. 1..length return message generators. Out of range returns nil (not an error). Currently broken — see the danger callout.",
+    },
+  }}
+/>
+
+Generators are **derived from the public key**, not stored with it. That is what lets one key sign
+credentials of any width: you re-`Init` with a different `length` and get a different generator set.
+It also means the verifier must `Init` with exactly the same `length` the signer used, or every
+generator differs and nothing verifies.
+
+`Get` is one-based for messages: message index `i` in your slice uses generator `Get(i + 1)`, and
+`Get(0)` is the blinding generator `h_0`.
+
+## Signing and verifying a full vector
+
+Grounded in `TestSignatureWorks`.
+
+```go sign.go
+package main
+
+import (
+	"fmt"
+	"log"
+
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/signatures/bbs"
+)
+
+func main() {
+	curve := curves.BLS12381(&curves.PointBls12381G2{})
+
+	pk, sk, err := bbs.NewKeys(curve)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// One generator per attribute.
+	generators, err := new(bbs.MessageGenerators).Init(pk, 4)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	msgs := []curves.Scalar{
+		curve.Scalar.Hash([]byte("did:key:z6Mk...")),
+		curve.Scalar.Hash([]byte("Ada")),
+		curve.Scalar.Hash([]byte("Lovelace")),
+		curve.Scalar.New(36),
+	}
+
+	sig, err := sk.Sign(generators, msgs)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Verify returns error, not bool. nil means valid.
+	if err := pk.Verify(sig, generators, msgs); err != nil {
+		log.Fatal("invalid signature: ", err)
+	}
+	fmt.Println("signature valid")
+}
+```
+
+`Sign` is **deterministic**: the internal `e` and `s` scalars come from a SHAKE256 DRBG seeded with
+the secret key, the generators, and the messages. Signing the same vector twice with the same key
+produces byte-identical output. There is no `io.Reader` parameter and no nonce to misuse.
+
+`Sign` errors on an empty message slice, on `generators.length < len(msgs)`, and on a zero secret
+key. `Verify` additionally rejects an identity public key and an identity signature point.
+
+:::note[`Sign` tolerates a short vector; the proof path does not]
+`sk.Sign` only requires `generators.length >= len(msgs)`, so you can sign 3 messages against
+4 generators. `NewPokSignature` requires `len(msgs) == generators.length` exactly. Size your
+generators to the credential, not to a round number.
+:::
+
+## Selective disclosure
+
+This is the flow that makes BBS+ worth its cost. The holder turns their signature into a
+`PokSignature`, derives a Fiat-Shamir challenge from a merlin transcript, and emits a
+`PokSignatureProof`. The verifier rebuilds the same transcript from the proof and the messages it
+was shown, recomputes the challenge, and checks the two match.
+
+<Steps>
+  <Step title="Classify every message">
+    Build a `[]common.ProofMessage` with exactly one entry per generator, in signing order. Use
+    `common.RevealedMessage{Message: m}` for attributes the verifier will see and
+    `common.ProofSpecificMessage{Message: m}` for attributes it will not. Use
+    `common.SharedBlindingMessage{Message: m, Blinding: b}` only when the same hidden value must be
+    linked to another proof (a range proof over the same age, for example).
+  </Step>
+  <Step title="Commit">
+    `NewPokSignature(sig, generators, proofMsgs, reader)` randomises the signature and builds the
+    Schnorr commitments. The reader supplies the proof's randomness — pass `crand.Reader`.
+  </Step>
+  <Step title="Derive the challenge">
+    Create a merlin transcript with an application-specific label, feed it
+    `pok.GetChallengeContribution(transcript)`, append the verifier's nonce, extract 64 bytes and
+    reduce them with `curve.Scalar.SetBytesWide`.
+  </Step>
+  <Step title="Generate">
+    `pok.GenerateProof(challenge)` converts the blinding factors into response scalars and returns
+    the `*PokSignatureProof`. Send that, the challenge, the revealed messages, and the nonce.
+  </Step>
+  <Step title="Verify">
+    The verifier calls `pokSig.Verify(revealedMsgs, pk, generators, nonce, challenge, transcript)`
+    with a transcript constructed **identically** to the prover's.
+  </Step>
+</Steps>
+
+Grounded in `TestPokSignatureProofSomeMessagesRevealed`.
+
+```go disclose.go
+package main
+
+import (
+	crand "crypto/rand"
+	"fmt"
+	"log"
+
+	"github.com/gtank/merlin"
+
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/signatures/bbs"
+	"github.com/sonr-io/crypto/signatures/common"
+)
+
+const transcriptLabel = "example.com/credential-presentation/v1"
+
+func main() {
+	curve := curves.BLS12381(&curves.PointBls12381G2{})
+	pk, sk, err := bbs.NewKeys(curve)
+	if err != nil {
+		log.Fatal(err)
+	}
+	generators, err := new(bbs.MessageGenerators).Init(pk, 4)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	msgs := []curves.Scalar{
+		curve.Scalar.New(2), // holder id      — keep hidden
+		curve.Scalar.New(3), // date of birth  — keep hidden
+		curve.Scalar.New(4), // issuer         — reveal
+		curve.Scalar.New(5), // credential type — reveal
+	}
+	sig, err := sk.Sign(generators, msgs)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// ---- holder side ------------------------------------------------------
+	// One entry per generator, in signing order.
+	proofMsgs := []common.ProofMessage{
+		&common.ProofSpecificMessage{Message: msgs[0]},
+		&common.ProofSpecificMessage{Message: msgs[1]},
+		&common.RevealedMessage{Message: msgs[2]},
+		&common.RevealedMessage{Message: msgs[3]},
+	}
+
+	pok, err := bbs.NewPokSignature(sig, generators, proofMsgs, crand.Reader)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	nonce := curve.Scalar.Random(crand.Reader) // supplied by the verifier
+
+	transcript := merlin.NewTranscript(transcriptLabel)
+	pok.GetChallengeContribution(transcript)
+	transcript.AppendMessage([]byte("nonce"), nonce.Bytes())
+	okm := transcript.ExtractBytes([]byte("signature proof of knowledge"), 64)
+	challenge, err := curve.Scalar.SetBytesWide(okm)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	proof, err := pok.GenerateProof(challenge)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// ---- verifier side ----------------------------------------------------
+	revealed := map[int]curves.Scalar{
+		2: msgs[2],
+		3: msgs[3],
+	}
+
+	vTranscript := merlin.NewTranscript(transcriptLabel) // same label, same order
+	ok := proof.Verify(revealed, pk, generators, nonce, challenge, vTranscript)
+	fmt.Println("presentation valid:", ok)
+}
+```
+
+`revealed` is keyed by **zero-based message index**, matching the position in the original `msgs`
+slice — not by generator index.
+
+### What `Verify` actually checks, and what `VerifySigPok` does not
+
+`PokSignatureProof.Verify` does two independent things:
+
+1. **`VerifySigPok(pk)`** — a pairing check that the randomised signature is a real signature under
+   `pk`. You can call this on its own.
+2. **Challenge equality** — it calls `GetChallengeContribution(generators, revealedMsgs, challenge,
+   transcript)`, re-extracts 64 bytes from the transcript, and compares the result to the challenge
+   you passed in. This is what binds the *revealed messages* to the proof.
+
+Step 2 is why the transcript matters so much. If the verifier reveals a different message set, uses
+a different transcript label, or appends the nonce at a different point, the recomputed challenge
+differs and `Verify` returns `false`.
+
+:::warning[A transcript mismatch is indistinguishable from a forgery]
+Prover and verifier must construct the merlin transcript with the **same label, the same appended
+messages, in the same order, with the same domain-separation byte strings**. Any divergence produces
+a different challenge and `Verify` returns `false` — with no error, no diagnostic, and nothing to
+distinguish it from an actual attack. Put the transcript construction in one shared function that
+both sides call. `PokSignatureProof.Verify` returns a bare `bool`; there is no error channel at all.
+:::
+
+You can also drive the two halves manually — the test does exactly this to show BBS+ composing with
+other sigma protocols that share the transcript:
+
+```go
+proof.GetChallengeContribution(generators, revealed, challenge, vTranscript)
+// ...other protocols append their contributions to vTranscript here...
+vTranscript.AppendMessage([]byte("nonce"), nonce.Bytes())
+okm := vTranscript.ExtractBytes([]byte("signature proof of knowledge"), 64)
+vChallenge, _ := curve.Scalar.SetBytesWide(okm)
+
+valid := proof.VerifySigPok(pk) && challenge.Cmp(vChallenge) == 0
+```
+
+## Blind signing
+
+The dual problem: the *issuer* must sign an attribute it is not allowed to see — a link secret, a
+biometric template, a device key. The holder commits to those messages, proves knowledge of the
+committed values, and the issuer signs the commitment together with the messages it does know.
+
+<Steps>
+  <Step title="Holder commits">
+    `NewBlindSignatureContext(curve, hiddenMsgs, generators, nonce, reader)` returns the context to
+    send to the issuer **and** a `common.SignatureBlinding` the holder keeps. `hiddenMsgs` is a
+    `map[int]curves.Scalar` keyed by zero-based message index.
+  </Step>
+  <Step title="Issuer verifies the commitment">
+    `ctx.Verify(knownIndices, generators, nonce)` checks the holder's proof of knowledge of the
+    hidden values, so the issuer is not signing arbitrary garbage. `knownIndices` is the sorted list
+    of indices the *issuer* supplies.
+  </Step>
+  <Step title="Issuer signs">
+    `ctx.ToBlindSignature(knownMsgs, sk, generators, nonce)` produces a `*BlindSignature`. It calls
+    `Verify` internally, so a bad commitment fails here too.
+  </Step>
+  <Step title="Holder unblinds">
+    `blindSig.ToUnblinded(blinding)` adds the retained blinding factor back into the `s` component,
+    yielding an ordinary `*Signature` that verifies against the complete message vector.
+  </Step>
+</Steps>
+
+Grounded in `TestBlindSignatureContext`.
+
+```go blind.go
+package main
+
+import (
+	crand "crypto/rand"
+	"fmt"
+	"log"
+
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/signatures/bbs"
+)
+
+func main() {
+	curve := curves.BLS12381(&curves.PointBls12381G2{})
+	pk, sk, err := bbs.NewKeys(curve)
+	if err != nil {
+		log.Fatal(err)
+	}
+	generators, err := new(bbs.MessageGenerators).Init(pk, 4)
+	if err != nil {
+		log.Fatal(err)
+	}
+	nonce := curve.Scalar.Random(crand.Reader)
+
+	// ---- holder: hide message 0 from the issuer ---------------------------
+	hidden := map[int]curves.Scalar{
+		0: curve.Scalar.Hash([]byte("link-secret")),
+	}
+	ctx, blinding, err := bbs.NewBlindSignatureContext(curve, hidden, generators, nonce, crand.Reader)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// Send ctx (and nonce) to the issuer. Keep `blinding`.
+
+	// ---- issuer: signs only what it knows ---------------------------------
+	known := map[int]curves.Scalar{
+		1: curve.Scalar.Hash([]byte("firstname")),
+		2: curve.Scalar.Hash([]byte("lastname")),
+		3: curve.Scalar.Hash([]byte("age")),
+	}
+	blindSig, err := ctx.ToBlindSignature(known, sk, generators, nonce)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// ---- holder: unblind and check ----------------------------------------
+	sig := blindSig.ToUnblinded(blinding)
+
+	full := []curves.Scalar{hidden[0], known[1], known[2], known[3]}
+	if err := pk.Verify(sig, generators, full); err != nil {
+		log.Fatal("unblinded signature invalid: ", err)
+	}
+	fmt.Println("blind-signed credential valid")
+}
+```
+
+The issuer never sees `hidden[0]`. It only ever handles `ctx.commitment`, a group element, plus a
+Schnorr proof that the holder knows the openings.
+
+:::danger[Lose the blinding factor and the signature is dead]
+`ToUnblinded` is the only way to turn a `*BlindSignature` into a verifiable `*Signature`, and it
+requires the exact `common.SignatureBlinding` returned alongside the context. That value is random,
+is never transmitted, and cannot be recovered from the signature, the context, or the issuer.
+Persist it atomically with the blind signature or the credential is unusable and must be re-issued.
+:::
+
+:::warning[The index sets must partition the vector]
+`hidden` and `known` are both keyed by zero-based message index, and between them they must cover
+every position `0..length-1` exactly once. Nothing checks this. An index present in neither map
+leaves a generator unaccounted for and the unblinded signature simply fails to verify; an index
+present in both silently produces a signature over a value the holder did not intend.
+:::
+
+## Serialization
+
+Every type here is a `BinaryMarshaler`, but the wire format does not carry its curve, so the
+unmarshalling side needs `Init(curve)` first:
+
+```go
+data, err := sig.MarshalBinary()
+
+restored := new(bbs.Signature).Init(curve)
+err = restored.UnmarshalBinary(data)
+```
+
+The same pattern applies to `PublicKey`, `SecretKey`, `BlindSignature`, `BlindSignatureContext`, and
+`PokSignatureProof`. Calling `UnmarshalBinary` on a zero-valued struct dereferences nil fields and
+panics.
+
+`BlindSignatureContext.MarshalBinary` writes the commitment point followed by the challenge and one
+scalar per proof — `PointSize + (N + 1) * ScalarSize` bytes.
+
+## Caveats
+
+:::danger[Broken message binding]
+Restated because it invalidates everything above: `MessageGenerators.Get` makes all generators
+equal, so a signature binds only the *sum* of the message scalars.
+:::
+
+:::warning[Inconsistent failure signalling]
+`PublicKey.Verify` and `BlindSignatureContext.Verify` return `error`. `PokSignatureProof.Verify` and
+`VerifySigPok` return `bool`. `MessageGenerators.Get` returns a bare `nil` for an out-of-range index
+rather than an error, so a bad index surfaces later as a nil-pointer dereference in whatever point
+operation consumes it. Do not assume a uniform idiom across this package.
+:::
+
+:::note[Deterministic signing has a privacy consequence]
+Because `Sign` derives its randomness from `(sk, generators, msgs)`, re-issuing the identical
+credential yields the identical signature bytes. That is convenient for idempotent issuance and bad
+for unlinkability if raw signatures ever leave the holder. Present via `PokSignatureProof`, which
+re-randomises, rather than by forwarding the signature.
+:::
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Proof toolkit" href="/signatures" icon="wrench">
+    `signatures/common` — `ProofMessage`, `ProofCommittedBuilder`, `HmacDrbg`, and the scalar aliases
+    this page uses.
+  </Card>
+  <Card title="Schnorr proofs" href="/zero-knowledge/schnorr" icon="binary">
+    The standalone sigma protocol, for composing proofs of discrete-log knowledge alongside a
+    BBS+ presentation.
+  </Card>
+  <Card title="Accumulator" href="/zero-knowledge/accumulator" icon="layers">
+    Constant-size set membership on the same pairing curve — the usual companion for revocation.
+  </Card>
+  <Card title="Security notes" href="/reference/security" icon="shield">
+    Every defect found while documenting this library, in one place.
+  </Card>
+</CardGroup>

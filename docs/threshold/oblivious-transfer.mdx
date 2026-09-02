@@ -1,0 +1,428 @@
+---
+title: Oblivious Transfer
+description: The base OT and correlated OT extension underneath threshold ECDSA — simplest (Verified Simplest OT) and kos (KOS15 cOT extension).
+sidebar:
+  order: 6
+  icon: shuffle
+---
+
+:::note[These are internal building blocks, not a user-facing API]
+`ot/base/simplest` and `ot/extension/kos` exist to serve
+[`tecdsa/dklsv1`](/threshold/threshold-ecdsa). They are exported because the tECDSA packages need
+them across package boundaries, not because application code is meant to call them. If you are
+building a wallet, use [MPC Enclave](/identity/mpc-enclave); if you are building a signing service,
+use the `dklsv1` iterators. This page is here so you can *understand and audit* the layer beneath
+tECDSA, and so that a `simplest.SenderOutput` appearing in a DKG result type is not a mystery.
+:::
+
+## What oblivious transfer is, and why ECDSA needs it
+
+In 1-out-of-2 OT the sender holds two strings `m_0`, `m_1`; the receiver holds a choice bit `b`.
+After the protocol the receiver knows `m_b` and nothing about `m_{1-b}`, and the sender learns
+nothing about `b`.
+
+ECDSA needs this because signing requires computing `k^{-1}(H(m) + r·sk)` where `k` and `sk` are
+both *split across two parties*. Adding shares is free; multiplying them is not. The standard
+two-party trick is to expand one party's secret into bits, have the other party offer a correlated
+pair per bit, and let OT select. Sum the selections and you have an additive sharing of the product,
+with neither side having learned a factor. That is precisely what `sign.MultiplySender` /
+`MultiplyReceiver` do, and `kos` is the OT engine they drive.
+
+## Two layers, one reason
+
+Base OT costs public-key operations — a Schnorr proof, a scalar multiplication per instance. A
+single ECDSA signature needs thousands of OTs. Running thousands of base OTs would be intolerably
+slow.
+
+**OT extension** fixes this. You run a small fixed number of base OTs once — `kos.Kappa` = 256 of
+them, the computational security parameter — and then stretch that seed material into arbitrarily
+many OTs using nothing but hashing and binary-field arithmetic. In `kos` each extension produces
+`L = 2·Kappa + 2·s = 672` correlated OTs (with `s = 80`, the statistical security parameter) from
+that one seed set.
+
+So the pipeline is: **`simplest` once → `kos` many times.**
+
+<Steps>
+<Step title="Seed OT — 256 instances of ot/base/simplest">
+Run during DKG. Its outputs (`SenderOutput` for Bob, `ReceiverOutput` for Alice) are persisted as
+part of the DKG result and reused for every subsequent signature.
+</Step>
+<Step title="cOT extension — ot/extension/kos, per signature">
+Consumes the persisted seed OT results and produces the 672 correlated OTs a signature needs, in
+three cheap rounds.
+</Step>
+</Steps>
+
+:::warning[Roles cross between the layers]
+`NewCOtSender` takes a `*simplest.ReceiverOutput`, and `NewCOtReceiver` takes a
+`*simplest.SenderOutput`. The constructor docs flag this explicitly — "note the reversal of roles".
+Wire them the intuitive way and the protocol fails.
+:::
+
+## `ot/base/simplest` — Verified Simplest OT
+
+The package doc names its lineage precisely: "Verified Simplest OT" as defined in "protocol 7" of
+[DKLs18](https://eprint.iacr.org/2018/499.pdf), with the original Simplest OT from
+[CC15](https://eprint.iacr.org/2015/267.pdf). Multiple choice bits run in parallel, and it is
+implemented as a **Random OT** — the sender does not choose its messages; both are random pads
+produced by the protocol.
+
+### Security model, from the source
+
+- The "Verified" prefix is the point: rounds 4–6 are a challenge/response/opening phase that lets
+  the receiver detect a cheating sender. This is the **maliciously secure** variant of Simplest OT,
+  not the semi-honest one.
+- Ideal functionalities are instantiated concretely, and the package says which: ZKP Schnorr realizes
+  the `F^{R_{DL}}_{ZK}` zero-knowledge functionality, and *"We have used HMAC for realizing the Random
+  Oracle Hash function, the key for HMAC is received as input to the protocol."* The HMAC key is the
+  `uniqueSessionId`.
+- Session binding uses a Merlin transcript, initialised with the domain string
+  `"Coinbase_DKLs_SeedOT"` and immediately absorbing `uniqueSessionId`.
+
+### Construction
+
+```go
+import (
+	"crypto/rand"
+
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/ot/base/simplest"
+)
+
+curve := curves.K256()
+
+// Fresh, unpredictable, and identical on both sides. See the danger callout.
+uniqueSessionId := [simplest.DigestSize]byte{}
+if _, err := rand.Read(uniqueSessionId[:]); err != nil {
+	return err
+}
+
+const batchSize = 256 // must be a multiple of 8
+
+sender, err := simplest.NewSender(curve, batchSize, uniqueSessionId)
+if err != nil {
+	return err
+}
+receiver, err := simplest.NewReceiver(curve, batchSize, uniqueSessionId)
+if err != nil {
+	return err
+}
+```
+
+<TypeTable
+  type={{
+    curve: {
+      type: "*curves.Curve",
+      required: true,
+      description: "Group for the Diffie–Hellman-style pad derivation. Tests exercise K256 and P256.",
+    },
+    batchSize: {
+      type: "int",
+      required: true,
+      description: "Number of parallel OTs. MUST be a multiple of 8 — the constructors reject anything else with 'batch size should be a multiple of 8', because choice bits are stored packed. tECDSA passes kos.Kappa (256).",
+    },
+    uniqueSessionId: {
+      type: "[simplest.DigestSize]byte",
+      required: true,
+      description: "32 bytes. Doubles as the Merlin transcript session binding and the HMAC key for the random oracle. Both parties must supply the identical value, and it must never repeat.",
+    },
+  }}
+/>
+
+`DigestSize = 32` — the hash length, and also the plaintext/ciphertext size for the optional
+encryption steps.
+
+### The eight interleaved rounds
+
+As in tECDSA, the numbers form one global sequence across both parties; the sender owns the odd
+rounds and the receiver the even ones. `ot/ottest.RunSimplestOT` wires all of it up:
+
+```go
+import "github.com/sonr-io/crypto/ot/ottest"
+
+// Creates both parties, runs rounds 1–6, and returns their outputs.
+senderOutput, receiverOutput, err := ottest.RunSimplestOT(curve, batchSize, uniqueSessionId)
+```
+
+Its own doc says it is "a utility function used _only_ during various tests". The sequence it
+performs, which is the canonical call order:
+
+<Steps>
+<Step title="Round 1 — sender: Round1ComputeAndZkpToPublicKey() (*schnorr.Proof, error)">
+Sender computes its key pair `B = b·G` and returns a Schnorr proof of knowledge of `b`. Protocol 7,
+step 1.
+</Step>
+<Step title="Round 2 — receiver: Round2VerifySchnorrAndPadTransfer(proof) ([]ReceiversMaskedChoices, error)">
+Receiver verifies the proof (step 2) and performs the Pad Transfer (step 3), returning the masked
+choices — the paper's `A` values, in compressed form. Its own random choice bits were generated in
+`NewReceiver`.
+</Step>
+<Step title="Round 3 — sender: Round3PadTransfer(maskedChoices) ([]OtChallenge, error)">
+Steps 4 and 5. Sender derives both one-time pads per instance and emits the challenges `xi`.
+</Step>
+<Step title="Round 4 — receiver: Round4RespondToChallenge(challenge) ([]OtChallengeResponse, error)">
+Step 6. Start of the Verify phase: the receiver returns `rho'` for the sender to check.
+</Step>
+<Step title="Round 5 — sender: Round5Verify(challengeResponses) ([]ChallengeOpening, error)">
+Step 7. Aborts if `rho' != H(H(rho^0))`. On success the sender opens its challenges.
+</Step>
+<Step title="Round 6 — receiver: Round6Verify(challengeOpenings) error">
+Step 8, the last verification. Aborts unless `H(rho^w)` matches what the receiver computed itself
+*and* `xi == H(opening_0) XOR H(opening_1)`. After this returns nil the random OT is complete and
+`Output` is valid on both sides.
+</Step>
+<Step title="Rounds 7 and 8 — OPTIONAL, only for non-random OT">
+`sender.Round7Encrypt(messages)` and `receiver.Round8Decrypt(ciphertext)` bootstrap the random OT
+into an actual OT of chosen messages. The package doc states these are optional and that "in the
+setting where this OT is used as the seed OT in an OT Extension protocol, the encryption and
+decryption steps are not needed" — so tECDSA never calls them.
+</Step>
+</Steps>
+
+### Outputs
+
+<TypeTable
+  type={{
+    "SenderOutput.OneTimePadEncryptionKeys": {
+      type: "[]OneTimePadEncryptionKeys",
+      required: true,
+      description: "Rho^0 and Rho^1 — both pads per instance, as [2][32]byte. One entry per batch slot. Secret.",
+    },
+    "ReceiverOutput.OneTimePadDecryptionKey": {
+      type: "[]OneTimePadDecryptionKey",
+      required: true,
+      description: "Rho^w — exactly one pad per instance, as [32]byte: the one matching the receiver's choice bit. Secret.",
+    },
+    "ReceiverOutput.PackedRandomChoiceBits": {
+      type: "[]byte",
+      required: true,
+      description: "The choice vector packed one bit per bit, batchSize/8 bytes. Secret.",
+    },
+    "ReceiverOutput.RandomChoiceBits": {
+      type: "[]int",
+      required: true,
+      description: "The same choices unpacked, one int per instance. Derived from the packed form at construction.",
+    },
+  }}
+/>
+
+The correctness invariant, which the tests assert directly:
+
+$$
+\texttt{ReceiverOutput.OneTimePadDecryptionKey}[i] = \texttt{SenderOutput.OneTimePadEncryptionKeys}[i][\texttt{RandomChoiceBits}[i]]
+$$
+
+The optional message layer is `SenderOutput.Encrypt(plaintexts)` (protocol step 9) and
+`ReceiverOutput.Decrypt(ciphertexts)` (step 10); the round wrappers above just call these.
+`ExtractBitFromByteVector(vector []byte, index int) byte` reads the `index`-th bit of a packed
+vector, little-endian both across and within bytes — needed to interpret `PackedRandomChoiceBits`
+by hand.
+
+### Streaming helpers
+
+```go
+senderPipe, receiverPipe := simplest.NewPipeWrappers()
+errorsChannel := make(chan error, 2)
+
+go func() { errorsChannel <- simplest.SenderStreamOTRun(sender, senderPipe) }()
+go func() { errorsChannel <- simplest.ReceiverStreamOTRun(receiver, receiverPipe) }()
+
+for i := 0; i < 2; i++ {
+	if err := <-errorsChannel; err != nil {
+		return err
+	}
+}
+```
+
+`SenderStreamOTRun(sender *Sender, rw io.ReadWriter) error` and
+`ReceiverStreamOTRun(receiver *Receiver, rw io.ReadWriter) error` run the whole six-round process
+over one `io.ReadWriter` — a websocket in practice — handling all encoding and decoding. The docs
+frame the purpose as "conveniently bundling up the entire seed OT process, for use in tests".
+`NewPipeWrappers()` returns a connected in-memory pair for driving both sides in one process.
+
+## `ot/extension/kos` — correlated OT extension
+
+Maliciously secure OT extension, "Protocol 9" of DKLs18, originally
+[KOS15](https://eprint.iacr.org/2015/546.pdf) — both cited in the package doc.
+
+This is *correlated* OT: the receiver supplies a choice vector, the sender supplies input scalars
+`alpha_j`, and the two outputs add to `alpha_j` where the choice bit is 1 and to zero where it is 0.
+That additive-sharing-of-a-selected-value shape is exactly what the multiplication protocol
+consumes.
+
+### Constants
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `Kappa` | 256 | Computational security parameter — and the number of base OTs required |
+| `KappaBytes` | 32 | `Kappa >> 3` |
+| `L` | 672 | cOT batch size, `2*Kappa + 2*s` with `s = 80` (statistical security parameter) |
+| `COtBlockSizeBytes` | 84 | `L >> 3` — size of the packed choice vector |
+| `OtWidth` | 2 | Scalars per cOT slot; both parties get `OtWidth` shares per bit |
+
+### Three rounds
+
+```go
+import (
+	"crypto/rand"
+
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/ot/base/simplest"
+	"github.com/sonr-io/crypto/ot/extension/kos"
+	"github.com/sonr-io/crypto/ot/ottest"
+)
+
+func runCOt(curve *curves.Curve) error {
+	uniqueSessionId := [simplest.DigestSize]byte{}
+	if _, err := rand.Read(uniqueSessionId[:]); err != nil {
+		return err
+	}
+
+	// Seed OT: exactly Kappa base OTs.
+	baseSenderOutput, baseReceiverOutput, err := ottest.RunSimplestOT(curve, kos.Kappa, uniqueSessionId)
+	if err != nil {
+		return err
+	}
+
+	// Note the crossed roles.
+	sender := kos.NewCOtSender(baseReceiverOutput, curve)
+	receiver := kos.NewCOtReceiver(baseSenderOutput, curve)
+
+	// Receiver's input: the packed choice vector.
+	choice := [kos.COtBlockSizeBytes]byte{}
+	if _, err = rand.Read(choice[:]); err != nil {
+		return err
+	}
+
+	// Sender's input: the correlations alpha_j.
+	input := [kos.L][kos.OtWidth]curves.Scalar{}
+	for i := 0; i < kos.L; i++ {
+		for j := 0; j < kos.OtWidth; j++ {
+			input[i][j] = curve.Scalar.Random(rand.Reader)
+		}
+	}
+
+	round1Output, err := receiver.Round1Initialize(uniqueSessionId, choice)
+	if err != nil {
+		return err
+	}
+	round2Output, err := sender.Round2Transfer(uniqueSessionId, input, round1Output)
+	if err != nil {
+		return err
+	}
+	if err = receiver.Round3Transfer(round2Output); err != nil {
+		return err
+	}
+
+	// Invariant: for every slot j and every k < OtWidth,
+	//   sender.OutputAdditiveShares[j][k] + receiver.OutputAdditiveShares[j][k]
+	//     == input[j][k]   if choice bit j is 1
+	//     == 0             if choice bit j is 0
+	return nil
+}
+```
+
+<Steps>
+<Step title="Round 1 — receiver: Round1Initialize(uniqueSessionId, choice) (*Round1Output, error)">
+Steps 1–4 of Protocol 9. The receiver extends its packed `L`-bit choice vector, derives the matrix
+`U` from the seed OT pads, and emits `Round1Output{U, WPrime, VPrime}` — `WPrime` and `VPrime` are
+the consistency-check values that make the extension maliciously secure rather than merely
+semi-honest.
+</Step>
+<Step title="Round 2 — sender: Round2Transfer(uniqueSessionId, input, round1Output) (*Round2Output, error)">
+Steps 2, 5 and 6. The sender checks `WPrime`/`VPrime`, transposes and hashes the matrix, and returns
+`Round2Output{Tau}`. Side effect: `sender.OutputAdditiveShares` is populated.
+</Step>
+<Step title="Round 3 — receiver: Round3Transfer(round2Output) error">
+Step 7. The receiver computes its own `OutputAdditiveShares` from `Tau`. No return value beyond the
+error.
+</Step>
+</Steps>
+
+Both parties read their result from the exported field
+`OutputAdditiveShares [L][OtWidth]curves.Scalar`.
+
+Streaming equivalents mirror the base layer:
+`SenderStreamCOtRun(sender *Sender, hashKeySeed [simplest.DigestSize]byte, input [L][OtWidth]curves.Scalar, rw io.ReadWriter) error`
+and
+`ReceiverStreamCOtRun(receiver *Receiver, hashKeySeed [simplest.DigestSize]byte, choice [COtBlockSizeBytes]byte, rw io.ReadWriter) error`.
+Both take the inputs plus a `ReadWriter` and handle every round and every encode/decode.
+
+## Caveats
+
+:::danger[Never reuse a uniqueSessionId across executions]
+The session id is not a label. In `simplest` it is absorbed into the Merlin transcript that binds
+the Schnorr proof and every hash in the protocol; the package doc identifies it as *the HMAC key
+realizing the random oracle*. In `kos` it is passed to both `Round1Initialize` and `Round2Transfer`
+and keys the matrix hashing.
+
+Reusing one across two executions therefore reuses the random-oracle keying. Two runs produce
+related pads, the consistency-check values from one run become valid transcripts for another, and
+the malicious-security argument — which assumes a fresh independent oracle per session — no longer
+holds. Concretely, replaying a recorded round-1 message under a repeated session id is exactly the
+attack the transcript binding exists to stop.
+
+The rules:
+
+- 32 bytes from a CSPRNG, per execution. Both parties must hold the identical value, so derive it
+  from *both* parties' contributions and agree on it before round 1 — that is why
+  `dklsv1`'s `Round1GenerateRandomSeed` has each side sample 32 bytes and appends both, with the
+  documented property "secure if either party is honest".
+- Never derive it from a counter, a timestamp, a key id, or anything an adversary can predict or
+  force to repeat.
+- Never persist and reuse one across signatures. Each signature runs a fresh cOT extension with a
+  fresh session id.
+- Do not confuse it with the *seed OT output*, which is deliberately long-lived. The seed OT result
+  is reused for many signatures; the session id of each cOT extension is not.
+:::
+
+:::warning[batchSize must be a multiple of 8]
+The package doc states the limitation plainly: "currently we only support batch OTs that are
+multiples of 8." Choice bits are packed, and both constructors reject a non-multiple with `batch
+size should be a multiple of 8`. `kos` always passes `Kappa` (256), which satisfies it.
+:::
+
+:::warning[Every output field is key material]
+`SenderOutput.OneTimePadEncryptionKeys`, `ReceiverOutput.OneTimePadDecryptionKey`, and
+`ReceiverOutput.PackedRandomChoiceBits` / `RandomChoiceBits` are all secret. They are persisted
+inside `dkg.AliceOutput.SeedOtResult` and `dkg.BobOutput.SeedOtResult`, and
+[serialised in the clear](/threshold/threshold-ecdsa) by the `dklsv1` encoders. Encrypt them at
+rest. The one consolation the DKG docs note: unlike a lost `SecretKeyShare`, disclosed seed-OT
+material can be replaced by re-running OT — which is what
+[key refresh](/threshold/threshold-ecdsa) does.
+:::
+
+:::warning[Not constant time]
+These packages do byte-level bit manipulation, binary-field multiplication, and matrix transposition
+over secret choice vectors, using ordinary indexing and branching. Only the `batchSize & 0x07`
+check carries a constant-time comment. Assume nothing here resists timing or cache analysis.
+:::
+
+:::note[No audit claim, and correctness only asserted for K256/P256]
+This is a port of Coinbase's Kryptology. The live tests run `TestOtOnMultipleCurves`,
+`TestOTStreaming`, `TestCOTExtension`, `TestCOTExtensionStreaming`, and `TestBinaryMult` — the cOT
+tests over `curves.K256()` and `curves.P256()` only. Nothing here constitutes a security review of
+either package. See [Security Notes](/reference/security).
+:::
+
+:::note[State is single-use]
+A `Sender`/`Receiver` pair, at either layer, serves exactly one protocol execution. Round methods
+mutate the value and are not goroutine-safe.
+:::
+
+## Next
+
+<CardGroup cols={2}>
+<Card title="Threshold ECDSA" href="/threshold/threshold-ecdsa" icon="pen-tool">
+The consumer: DKG rounds 6–10 are the seed OT, and every signature runs a cOT extension.
+</Card>
+<Card title="Schnorr Proofs" href="/zero-knowledge/schnorr" icon="fingerprint">
+The proof of knowledge in base OT round 1.
+</Card>
+<Card title="Curves & Scalars" href="/foundations/curves" icon="binary">
+The `Curve`, `Point`, and `Scalar` types both packages are generic over.
+</Card>
+<Card title="Threshold Overview" href="/threshold" icon="users">
+Where this layer sits in the stack.
+</Card>
+</CardGroup>

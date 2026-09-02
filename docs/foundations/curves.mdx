@@ -1,0 +1,300 @@
+---
+title: Curves
+description: Every named curve constructor in core/curves, the complete Point and Scalar method sets, pairing curves, and a map of the low-level native field arithmetic underneath.
+sidebar:
+  order: 2
+  icon: circle-dot
+---
+
+`core/curves` is the catalog. It exposes one constructor per supported group, all of which hand back a `*curves.Curve` (or a `*curves.PairingCurve` for the pairing-friendly ones). Everything on this page was read out of `go doc github.com/sonr-io/crypto/core/curves`.
+
+**Reach for this page when** you need to know which curve a package will accept, what a serialized point looks like on the wire, or which method on `Point`/`Scalar` does the thing you want. **You do not need this page** if you are just passing a curve through — `curves.K256()` and go.
+
+## Named curves
+
+| Constructor | `Name` value | Constant | Notes |
+| --- | --- | --- | --- |
+| `curves.K256()` | `secp256k1` | `K256Name` | Bitcoin/Ethereum curve. 33-byte compressed points. |
+| `curves.P256()` | `P-256` | `P256Name` | NIST P-256 / secp256r1. |
+| `curves.ED25519()` | `ed25519` | `ED25519Name` | Edwards curve; 32-byte compressed points. |
+| `curves.BLS12381G1()` | `BLS12381G1` | `BLS12381G1Name` | G1 of BLS12-381; 48-byte compressed points. |
+| `curves.BLS12381G2()` | `BLS12381G2` | `BLS12381G2Name` | G2 of BLS12-381; 96-byte compressed points. |
+| `curves.BLS12377G1()` | `BLS12377G1` | `BLS12377G1Name` | G1 of BLS12-377 (gnark-crypto backed). |
+| `curves.BLS12377G2()` | `BLS12377G2` | `BLS12377G2Name` | G2 of BLS12-377. |
+| `curves.PALLAS()` | `pallas` | `PallasName` | Pasta/Pallas curve. |
+
+Two extra string constants exist for "the pairing construction, group unspecified": `BLS12831Name = "BLS12831"` and `BLS12377Name = "BLS12377"`.
+
+### Lookup by name
+
+```go
+curve := curves.GetCurveByName(curves.K256Name)
+if curve == nil {
+	return fmt.Errorf("unsupported curve")
+}
+```
+
+`GetCurveByName` accepts every constant above. `BLS12831Name` and `BLS12377Name` both resolve to the **G1** curve. Anything else returns `nil`.
+
+:::warning[`GetCurveByName` returns nil, not an error]
+There is no second return value. If you feed it a name from user input or a wire format, you must nil-check before dereferencing, or you get a nil-pointer panic on the first field access.
+:::
+
+:::note[`BLS12831Name` is a typo that is now load-bearing]
+The constant is spelled `BLS12831` (digits transposed) and its *value* is the string `"BLS12831"`. This is not cosmetic: `curves.BLS12381(...)` sets `PairingCurve.Name` to that string, so a BLS12-381 pairing curve reports `Name == "BLS12831"`. If you round-trip a pairing curve through its name, use the constant — never a hand-typed `"BLS12381"`.
+:::
+
+## Pairing curves
+
+BBS+ and the accumulator need a pairing, so they take a `*curves.PairingCurve` — a *different type* from `*curves.Curve`. Passing `curves.BLS12381G1()` where a `*PairingCurve` is wanted will not compile.
+
+```go
+type PairingCurve struct {
+	Scalar  PairingScalar
+	PointG1 PairingPoint
+	PointG2 PairingPoint
+	GT      Scalar
+	Name    string
+}
+```
+
+<TypeTable
+  type={{
+    "BLS12381(preferredPoint Point)": {
+      type: "*PairingCurve",
+      description: "Builds the BLS12-381 pairing curve. The argument selects which group the curve's scalars prefer to project into — pass BLS12381G1().NewIdentityPoint() or the G2 equivalent.",
+    },
+    "GetPairingCurveByName(name string)": {
+      type: "*PairingCurve",
+      description: "Accepts BLS12381G1Name, BLS12381G2Name, or BLS12831Name. Returns nil for anything else.",
+    },
+    "NewG1GeneratorPoint() / NewG2GeneratorPoint()": {
+      type: "PairingPoint",
+      description: "Generators of G1 and G2.",
+    },
+    "NewG1IdentityPoint() / NewG2IdentityPoint()": {
+      type: "PairingPoint",
+      description: "Identity elements of G1 and G2.",
+    },
+    "NewScalar()": {
+      type: "PairingScalar",
+      description: "Zero scalar carrying the preferred-point projection.",
+    },
+    "ScalarG1BaseMult(sc) / ScalarG2BaseMult(sc)": {
+      type: "PairingPoint",
+      description: "Fixed-base multiplication in G1 or G2 respectively.",
+    },
+  }}
+/>
+
+`PairingPoint` and `PairingScalar` are extensions of the ordinary interfaces, so every `Point`/`Scalar` method is still available:
+
+```go
+type PairingPoint interface {
+	Point
+	OtherGroup() PairingPoint          // G1 <-> G2
+	Pairing(rhs PairingPoint) Scalar   // e(self, rhs) as a GT element
+	MultiPairing(...PairingPoint) Scalar
+}
+
+type PairingScalar interface {
+	Scalar
+	SetPoint(p Point) PairingScalar
+}
+```
+
+Note that `Pairing` returns a `Scalar`, not a distinct GT type — the target group element is modelled as a `ScalarBls12381Gt`. It supports the `Scalar` arithmetic surface (`Mul`, `Add`, `Invert`, `Bytes`) but it is a group element in the target group `GT`, not a field element mod the group order. Do not feed it back into `ScalarBaseMult`.
+
+```go title="pairing.go"
+package main
+
+import (
+	"crypto/rand"
+	"fmt"
+
+	"github.com/sonr-io/crypto/core/curves"
+)
+
+func main() {
+	pc := curves.BLS12381(curves.BLS12381G1().NewIdentityPoint())
+
+	s := pc.NewScalar().Random(rand.Reader)
+	g1 := pc.ScalarG1BaseMult(s) // s·G1
+	g2 := pc.NewG2GeneratorPoint()
+
+	gt := g1.Pairing(g2) // e(s·G1, G2)
+	fmt.Println(pc.Name, len(gt.Bytes()))
+	fmt.Println(g1.OtherGroup().CurveName()) // BLS12381G2
+}
+```
+
+## The `Point` interface
+
+Twenty methods, no error returns except on the two deserializers and `Set`.
+
+| Method | Signature | Purpose |
+| --- | --- | --- |
+| `Random` | `Random(reader io.Reader) Point` | Uniform random group element from the reader. |
+| `Hash` | `Hash(bytes []byte) Point` | Hash-to-curve. Deterministic; the domain separation tag is fixed inside each implementation. |
+| `Identity` | `Identity() Point` | Point at infinity. |
+| `Generator` | `Generator() Point` | Group generator. |
+| `IsIdentity` | `IsIdentity() bool` | Identity test. |
+| `IsNegative` | `IsNegative() bool` | Sign-of-`y` test, curve-specific convention. |
+| `IsOnCurve` | `IsOnCurve() bool` | Curve-equation check. |
+| `Double` | `Double() Point` | `2·self`. |
+| `Scalar` | `Scalar() Scalar` | A zero scalar of the matching field — a convenience constructor, **not** a discrete log. |
+| `Neg` | `Neg() Point` | `-self`. |
+| `Add` / `Sub` | `Add(rhs Point) Point` | Group law. |
+| `Mul` | `Mul(rhs Scalar) Point` | Variable-base scalar multiplication. |
+| `Equal` | `Equal(rhs Point) bool` | Group equality (compares in affine, handles differing projective representations). |
+| `Set` | `Set(x, y *big.Int) (Point, error)` | Build from affine coordinates; errors if off-curve. |
+| `ToAffineCompressed` | `ToAffineCompressed() []byte` | Canonical short encoding. |
+| `ToAffineUncompressed` | `ToAffineUncompressed() []byte` | Canonical long encoding. |
+| `FromAffineCompressed` | `FromAffineCompressed(bytes []byte) (Point, error)` | Inverse of the above. |
+| `FromAffineUncompressed` | `FromAffineUncompressed(bytes []byte) (Point, error)` | Inverse of the above. |
+| `CurveName` | `CurveName() string` | The `Name` string of the owning curve. |
+| `SumOfProducts` | `SumOfProducts(points []Point, scalars []Scalar) Point` | Multi-scalar multiplication. |
+
+### Serialization
+
+Concrete point types also implement `MarshalBinary`/`UnmarshalBinary`, `MarshalText`/`UnmarshalText`, and `MarshalJSON`/`UnmarshalJSON` — that is how the higher layers (BBS+ proofs, accumulator witnesses, DKG round messages) persist points. The interface itself does not declare them, so if you need marshalling through the interface you type-assert to `encoding.BinaryMarshaler`.
+
+:::tip[Compressed lengths worth memorizing]
+K256 and P-256: 33 bytes compressed, 65 uncompressed. Ed25519 and Pallas: 32 / 64. BLS12-381 and BLS12-377 G1: 48 / 96. BLS12-381 and BLS12-377 G2: 96 / 192. Scalars are 32 bytes on every curve in the catalog. Always deserialize via `curve.Point.FromAffineCompressed` — the prototype knows the expected length and will reject a short or wrong-curve buffer.
+:::
+
+### `SumOfProducts` — multi-scalar multiplication
+
+This is the MSM entry point, and the reason Bulletproofs and the accumulator are tractable. Call it on the curve's point prototype; the receiver's own value is ignored.
+
+```go
+// Computes sum(scalars[i] · points[i]) using a 4-bit windowed bucket
+// (Pippenger-style) multi-exponentiation, not n independent scalar mults.
+result := curve.Point.SumOfProducts(points, scalars)
+if result == nil {
+	return errors.New("length mismatch or foreign point/scalar type")
+}
+```
+
+:::warning[`SumOfProducts` signals failure with a nil return]
+The interface method has no error channel. It returns `nil` if the two slices differ in length, or if any element is not the concrete `Point`/`Scalar` type belonging to this curve. Since `nil` is a valid-looking `Point` interface value until you call a method on it, an unchecked result turns a length bug into a nil-pointer panic several frames away. Check it.
+:::
+
+## The `Scalar` interface
+
+The doc comment describes it as "an element of the scalar field `F_q` of the elliptic curve construction" — that is, arithmetic is mod the **group order**, not the field characteristic.
+
+| Group | Methods |
+| --- | --- |
+| Construction | `Random(io.Reader)`, `Hash([]byte)`, `Zero()`, `One()`, `New(value int)`, `Clone()` |
+| Predicates | `IsZero()`, `IsOne()`, `IsOdd()`, `IsEven()`, `Cmp(rhs) int` |
+| Arithmetic | `Add`, `Sub`, `Mul`, `Div`, `Neg`, `Double`, `Square`, `Cube`, `MulAdd(y, z)` |
+| Fallible arithmetic | `Invert() (Scalar, error)`, `Sqrt() (Scalar, error)` |
+| Conversion | `SetBigInt(*big.Int) (Scalar, error)`, `BigInt() *big.Int`, `Bytes() []byte`, `SetBytes([]byte) (Scalar, error)`, `SetBytesWide([]byte) (Scalar, error)` |
+| Crossing over | `Point() Point` — the associated point type's prototype |
+
+Three behaviours that catch people:
+
+- **`Cmp` returns `-2`** if the two scalars belong to different fields. It is the library's only cross-curve mismatch signal. `-1`/`0`/`1` are the usual ordering.
+- **`New(value int)` takes a signed int** and reduces it, so `New(-1)` is `q - 1`. Since `q` is odd for these curves, `New(-1).IsEven()` is `true` — the parity predicates describe the *reduced representative*, not the integer you passed.
+- **`SetBytes` demands the exact width**, while `SetBytesWide` wants double the width and reduces. Use `SetBytesWide` when converting hash output into a scalar without modulo bias; use `Hash` if you just want "bytes to scalar" done correctly.
+
+```go
+// Uniform scalar from arbitrary input, no bias, no length constraints:
+s := curve.Scalar.Hash([]byte("some transcript bytes"))
+
+// Exact-width canonical decoding, e.g. reading a stored private key:
+s, err := curve.Scalar.SetBytes(keyBytes) // len(keyBytes) must be exactly 32 for K256
+```
+
+## The `crypto/elliptic` bridge
+
+Some code (Go's `crypto/ecdsa`, X.509 marshalling, the legacy `EcPoint` API) needs an `elliptic.Curve`. Several shims exist, and they are not interchangeable:
+
+| Function | Returns | Backing implementation |
+| --- | --- | --- |
+| `curves.K256Curve()` | `*Koblitz256` | native k256 field arithmetic |
+| `curves.NistP256Curve()` | `*NistP256` | native p256 field arithmetic |
+| `curves.SP256()` | `elliptic.Curve` | `github.com/dustinxie/ecc` secp256k1 |
+| `secp256k1.S256()` | `*secp256k1.BitCurve` | the vendored Koblitz `a=0` implementation |
+| `curves.Pallas()` | `*PallasCurve` | Pallas as an `elliptic.Curve` |
+
+All of them satisfy `elliptic.Curve`. `Curve.ToEllipticCurve()` is the generic entry point:
+
+```go
+ec, err := curves.K256().ToEllipticCurve() // -> *Koblitz256, nil
+ec, err = curves.ED25519().ToEllipticCurve() // -> nil, "can't convert ed25519"
+```
+
+:::danger[`ToEllipticCurve` only supports two curves]
+Only `K256Name` and `P256Name` return a curve. `ED25519`, `PALLAS`, and all four BLS variants return `nil` plus the error `can't convert <name>` — which is correct, since none of them are short-Weierstrass curves over a prime field in the `crypto/elliptic` sense. Handle the error; do not assume it is a curve-agnostic conversion.
+:::
+
+:::warning[`NistP256.ScalarMult` is not the native implementation]
+`*NistP256` defines `ScalarMul` — missing the trailing `t`. So the `elliptic.Curve` interface method `ScalarMult` resolves to the promoted `*elliptic.CurveParams.ScalarMult`, the generic deprecated `math/big` implementation, rather than the native p256 code the type was written to use. `ScalarBaseMult`, `Add`, `Double`, and `IsOnCurve` *are* wired to the native path. If you care about the variable-base path on P-256, use `curves.P256()` and the `Point.Mul` interface instead of the `elliptic.Curve` shim.
+:::
+
+`secp256k1.BitCurve` additionally offers `Marshal(x, y) []byte` / `Unmarshal(data) (x, y)` and exposes its parameters as public fields (`P`, `N`, `B`, `Gx`, `Gy`, `BitSize`).
+
+## `core/curves/native` — the layer below
+
+`native` is the constant-time-oriented field and point arithmetic that the modern `Point`/`Scalar` implementations sit on. It is a *building block*, and almost nothing outside `core/curves` should import it.
+
+Fields are represented as four 64-bit limbs in the Montgomery domain:
+
+```go
+const (
+	FieldBytes     = 32 // canonical byte width
+	FieldLimbs     = 4  // uint64 limbs
+	WideFieldBytes = 64 // width for bias-free reduction
+	MaxDstLen      = 255
+)
+
+type Field struct {
+	Value      [FieldLimbs]uint64
+	Params     *FieldParams   // R, R2, R3, Modulus, BiModulus
+	Arithmetic FieldArithmetic // per-curve limb routines
+}
+```
+
+`Field` provides `Add`, `Sub`, `Mul`, `Square`, `Double`, `Neg`, `Exp`, `Invert`, `Sqrt`, `CMove`, `Equal`, `Cmp`, plus `SetBytes`/`SetBytesWide`/`SetBigInt`/`SetLimbs`/`SetRaw` and their `Bytes`/`BigInt`/`Raw` inverses. `EllipticPoint` provides Weierstrass point arithmetic in Jacobian coordinates (`Add`, `Double`, `Generator`, `Hash`, `Equal`, `BigInt`, `GetX`, `GetY`).
+
+Which fields and groups are actually implemented:
+
+| Package | Contents |
+| --- | --- |
+| `native/bls12381` | `G1`, `G2`, `Gt`, the pairing `Engine`, `Fq`, `Bls12381FqNew()` |
+| `native/k256` | `K256PointNew()`; subpackages `k256/fp` (base field) and `k256/fq` (scalar field) |
+| `native/p256` | `P256PointNew()`; subpackages `p256/fp` and `p256/fq` |
+| `native/pasta` | Pallas/Vesta point code; subpackages `pasta/fp` and `pasta/fq` |
+
+### Hash-to-curve hashers
+
+`EllipticPointHasher` bundles a hash function with its expansion mode. It is what `Point.Hash` uses internally, and the only reason to construct one yourself is if you are calling `native.ExpandMsgXmd` / `native.ExpandMsgXof` or `EllipticPoint.Hash` directly.
+
+| Constructor | `Name()` | `Type()` |
+| --- | --- | --- |
+| `EllipticPointHasherSha256()` | `SHA-256` | XMD |
+| `EllipticPointHasherSha512()` | `SHA-512` | XMD |
+| `EllipticPointHasherSha3256()` | `SHA3-256` | XMD |
+| `EllipticPointHasherSha3384()` | `SHA3-384` | XMD |
+| `EllipticPointHasherSha3512()` | `SHA3-512` | XMD |
+| `EllipticPointHasherBlake2b()` | `BLAKE2b` | XMD |
+| `EllipticPointHasherShake128()` | `SHAKE-128` | XOF |
+| `EllipticPointHasherShake256()` | `SHAKE-256` | XOF |
+
+`ExpandMsgXmd` and `ExpandMsgXof` implement §5.4.1 and §5.4.2 of the CFRG hash-to-curve draft (the source links to `draft-irtf-cfrg-hash-to-curve-13`). Domain separation tags longer than `MaxDstLen` are hashed down using the `OversizeDstSalt` prefix `H2C-OVERSIZE-DST-`.
+
+:::warning[`native` is unforgiving]
+`ExpandMsgXmd` and `ExpandMsgXof` return `[]byte` with **no error channel** and will nil-dereference on a nil hasher. `Field` methods write into the receiver and return it, so aliasing the output with an input is only safe where the implementation says so. `Pow` and `Pow2k` are documented as "public only for convenience for some internal implementations". Treat the whole package as internal and use `Point`/`Scalar` instead.
+:::
+
+## Legacy curve types
+
+For completeness, since they show up in `go doc` next to everything above. These belong to the older API described on the [foundations overview](/foundations) and are used by `sharing/v1`, `dkg/gennaro`, and `ted25519` keygen.
+
+- `EcPoint{Curve elliptic.Curve; X, Y *big.Int}` with `NewScalarBaseMult`, `PointFromBytesUncompressed`, `Add`, `Neg`, `ScalarMult`, `Bytes`, `Equals`, `IsOnCurve`, `IsIdentity`, `IsBasePoint`, `IsValid`, and binary/JSON marshalling (plus `EcPointJSON` as the wire shape).
+- `Field`/`Element` — generic `big.Int` modular arithmetic over an explicit modulus, with `ElementJSON` for serialization.
+- `EcScalar` — a strategy interface (`Add`, `Sub`, `Neg`, `Mul`, `Div`, `Hash`, `Random`, `IsValid`, `Bytes`) implemented by `NewK256Scalar()`, `NewP256Scalar()`, `NewEd25519Scalar()`, `NewBls12381Scalar()`, and `NewPallasScalar()`.
+- `EcdsaSignature`, `EcdsaVerify`, and `VerifyEcdsa(pk *EcPoint, hash []byte, sig *EcdsaSignature) bool` — the verification hook used by threshold ECDSA. See [ECDSA](/signatures/ecdsa).
+- `Ed25519Order() *big.Int` — the Ed25519 group order as a `big.Int`.

@@ -1,0 +1,147 @@
+---
+title: Identity & Authorization
+description: The application-facing layer — threshold key enclaves, did:key identifiers, UCAN capability tokens, payload encryption, and WebAssembly code signing.
+sidebar:
+  order: 1
+  icon: fingerprint
+---
+
+Everything below this section is code you call directly from an application. The primitives in
+[Foundations](/foundations), [Signatures](/signatures), and [Threshold](/threshold) are the machinery;
+these five packages are the assembled product: a key that lives in two shares, an identifier derived
+from its public point, tokens that delegate narrow slices of authority over that key, and two
+supporting utilities for encrypting payloads and pinning executable code.
+
+## How the pieces compose
+
+<Steps>
+  <Step title="An enclave holds the key">
+    [`mpc.NewEnclave()`](/identity/mpc-enclave) runs a 2-of-2 DKLs18 threshold ECDSA key generation on
+    secp256k1 and returns an `Enclave`. The private key never exists as a single scalar: it lives as a
+    validator share and a user share. Signing is a two-party protocol; refreshing rotates both shares
+    while leaving the public key fixed.
+  </Step>
+  <Step title="Its public point becomes an identifier">
+    `enclave.PubKeyBytes()` yields the uncompressed public point. `keys.NewFromMPCPubKey` turns those
+    bytes into a [`keys.DID`](/identity/did-key), whose `String()` is a `did:key:z…` identifier — a
+    multicodec varint prefix plus multibase base58btc. That string is the stable, resolvable name for
+    the key.
+  </Step>
+  <Step title="The identifier issues capability tokens">
+    A [UCAN](/identity/ucan) token is a JWT whose issuer is that `did:key`, signed by the enclave.
+    Its `att` claim is a list of attenuations — `(capability, resource)` pairs. A holder can mint a
+    delegated token that *narrows* the set, never widens it, and attaches the parent as a proof.
+  </Step>
+  <Step title="Payloads and code get their own primitives">
+    [`ecies`](/identity/ecies) encrypts a payload to a secp256k1 public key without any prior
+    handshake. [`wasm`](/identity/wasm-modules) signs and hash-pins WebAssembly module bytes so a host
+    can refuse to load code it does not recognise.
+  </Step>
+</Steps>
+
+## Choosing a package
+
+| You want to… | Use | Notes |
+| --- | --- | --- |
+| Hold a signing key without a single point of compromise | `mpc` | 2-of-2 only; secp256k1 only |
+| Name a public key with a stable string | `keys` | RSA, Ed25519, secp256k1 |
+| Grant another party scoped, expiring authority | `ucan` | JWT-based, `ucv` header `0.9.0` |
+| Encrypt a message to someone's public key | `ecies` | Thin wrapper over `github.com/ecies/go/v2` |
+| Verify that a `.wasm` blob is the one you approved | `wasm` | Ed25519 signing + SHA-256 pinning |
+| Parse a chain-specific address | — | `keys/parsers` is unfinished; see [did:key](/identity/did-key) |
+
+## A minimal end-to-end shape
+
+```go
+package main
+
+import (
+	"fmt"
+
+	"github.com/sonr-io/crypto/keys"
+	"github.com/sonr-io/crypto/mpc"
+)
+
+func main() {
+	// 1. Threshold key: both shares generated locally.
+	enclave, err := mpc.NewEnclave()
+	if err != nil {
+		panic(err)
+	}
+
+	// 2. Identifier derived from the enclave's public point.
+	did, err := keys.NewFromMPCPubKey(enclave.PubKeyBytes())
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("issuer:", did.String()) // did:key:z...
+
+	// 3. Two-party signature over a message, verified against the public key.
+	sig, err := enclave.Sign([]byte("hello"))
+	if err != nil {
+		panic(err)
+	}
+	ok, err := enclave.Verify([]byte("hello"), sig)
+	fmt.Println("valid:", ok, err)
+}
+```
+
+Every one of these packages is generic over, or built on, the curve abstraction described in
+[Foundations → Curves](/foundations/curves). `Curve`, `Point`, and `Scalar` are not re-explained here.
+
+## Read this before you ship
+
+This section is the least finished part of the repository. The pages below document the rough edges
+in place rather than around them, because several of them are the kind that silently weaken a
+security property instead of failing loudly.
+
+:::danger[The short version]
+- An `mpc.Enclave` value holds **both** keyshares in one process. It is a key-management construct,
+  not a distributed-trust boundary.
+- `mpc.EnclaveData.Unmarshal` **panics** on `Marshal()` output, so a persisted enclave cannot be
+  restored through the package's own codec.
+- `ucan.GenerateJWTToken` / `VerifyJWTToken` sign with **HS256 under a hardcoded secret** compiled
+  into the package.
+- The UCAN verifier's caveat checks are placeholders that always succeed, so caveat restrictions are
+  **not enforced**.
+- `ucan.MPCTokenBuilder.CreateDelegatedToken` will sign a child token that grants **more** than its
+  parent; only `KeyshareSource.NewAttenuatedToken` enforces attenuation.
+- `ucan.MPCVerifier.VerifyMPCToken` fails outright — the `"MPC256"` signing method is never
+  registered with `golang-jwt`.
+- `keys/parsers` contains five empty files and a secp256k1 multicodec constant that disagrees with
+  `keys`.
+- `ecies.GenerateKeyFromSeed` is **not** deterministic on current Go toolchains.
+- `wasm.SecurityPolicy.Validate` only checks module size; its other fields are ignored.
+- `keys.DID.Address()` is a truncated hex prefix of the public key, not a hashed or checksummed
+  address, despite its comment claiming Keccak-256.
+
+Each of these was verified against the source and confirmed by running it, and is documented in
+detail on the page for its package. They are also aggregated on
+[Reference → Security](/reference/security).
+:::
+
+## Pages
+
+<CardGroup cols={2}>
+  <Card title="did:key Identifiers" href="/identity/did-key" icon="id-card">
+    Multicodec + multibase encoding, the `DID` and `PubKey` types, the non-standard 66-byte signature
+    layout, and why to avoid `keys/parsers`.
+  </Card>
+  <Card title="MPC Enclave" href="/identity/mpc-enclave" icon="shield">
+    2-of-2 threshold ECDSA lifecycle: keygen, sign, verify, refresh, import/export, and the real
+    security model.
+  </Card>
+  <Card title="UCAN Tokens" href="/identity/ucan" icon="ticket">
+    Capabilities, attenuation, delegation chains, templates, MPC signing, and which authorization
+    checks are not actually implemented.
+  </Card>
+  <Card title="ECIES" href="/identity/ecies" icon="mail">
+    Encrypt to a secp256k1 public key. A thin, honest wrapper — plus one seed hazard.
+  </Card>
+  <Card title="WASM Module Signing" href="/identity/wasm-modules" icon="package-check">
+    Ed25519 code signing and SHA-256 hash pinning for WebAssembly supply-chain verification.
+  </Card>
+  <Card title="Package Index" href="/reference/packages" icon="list">
+    Every package in the module with its status at a glance.
+  </Card>
+</CardGroup>

@@ -1,0 +1,312 @@
+---
+title: Protocol Iterator
+description: core/protocol — the Iterator and Message types that drive every interactive round-based protocol in this library, plus the crank loop you write to run them.
+sidebar:
+  order: 4
+  icon: arrow-left-right
+---
+
+`core/protocol` is 110 lines and contains no cryptography. It is the transport contract for interactive protocols: a two-method interface, an envelope struct, base64/JSON codecs, and two sentinel errors. Everything in [threshold ECDSA](/threshold/threshold-ecdsa) and the [MPC enclave](/identity/mpc-enclave) is driven through it.
+
+**Reach for this page when** you are wiring a DKLs18 DKG, sign, or refresh into your own transport (HTTP, gRPC, a queue) and need to know what to serialize, when to stop, and how to get the result out.
+
+## The `Iterator` interface
+
+```go
+type Iterator interface {
+	// Next runs the next round of the protocol.
+	// Returns `ErrProtocolFinished` when protocol has completed.
+	Next(input *Message) (*Message, error)
+
+	// Result returns the final result, if any, of the completed protocol.
+	// Returns nil if the protocol has not yet terminated.
+	// Returns an error if an error was encountered during protocol execution.
+	Result(version uint) (*Message, error)
+}
+```
+
+That is the whole abstraction. A protocol participant is a state machine holding a list of round functions and an index; `Next` runs the current round and advances. The concrete implementation in `tecdsa/dklsv1` is a `protoStepper`:
+
+```go
+type protoStepper struct {
+	steps []func(input *protocol.Message) (*protocol.Message, error)
+	step  int
+}
+
+func (p *protoStepper) Next(input *protocol.Message) (*protocol.Message, error) {
+	if p.step >= len(p.steps) {
+		return nil, protocol.ErrProtocolFinished
+	}
+	output, err := p.steps[p.step](input)
+	if err != nil {
+		return nil, err
+	}
+	p.step++
+	return output, nil
+}
+```
+
+The implications are worth stating plainly:
+
+- **The iterator is stateful and single-use.** There is no reset. One `AliceDkg` value runs one DKG.
+- **It is not safe for concurrent use.** `step` is a plain `int`. One goroutine per participant.
+- **`ErrProtocolFinished` is a success signal, not a failure.** It means "I have no more rounds". Any *other* non-nil error is a real failure and the protocol must be abandoned.
+- **`Next(nil)` is how you start.** The first speaker receives a nil input message.
+
+## `Message`
+
+```go
+type Message struct {
+	Payloads map[string][]byte `json:"payloads"`
+	Metadata map[string]string `json:"metadata"`
+	Protocol string            `json:"protocol"`
+	Version  uint              `json:"version"`
+}
+```
+
+<TypeTable
+  type={{
+    Payloads: {
+      type: "map[string][]byte",
+      required: true,
+      description: "The round's actual wire data, keyed by a payload label. The dklsv1 serializers use the single key \"direct\".",
+    },
+    Metadata: {
+      type: "map[string]string",
+      description: "String side channel. dklsv1 populates it with {\"round\": \"1\"} etc. — the round number as a decimal string. Nothing reads it back; the round sequencing comes from the iterator's own step index.",
+    },
+    Protocol: {
+      type: "string",
+      required: true,
+      description: "Which protocol this message belongs to — one of the Dkls18* constants.",
+    },
+    Version: {
+      type: "uint",
+      required: true,
+      description: "Serialization version of the payloads. Version0 = 100, Version1 = 200.",
+    },
+  }}
+/>
+
+### Protocol name constants
+
+Verbatim from `core/protocol`:
+
+| Constant | Value |
+| --- | --- |
+| `protocol.Dkls18Dkg` | `"DKLs18-DKG"` |
+| `protocol.Dkls18Sign` | `"DKLs18-Sign"` |
+| `protocol.Dkls18Refresh` | `"DKLs18-Refresh"` |
+
+Those are the only three. There is no constant for the Ed25519 threshold scheme, FROST, or the Gennaro DKG — those packages do not use this envelope.
+
+### Version constants
+
+| Constant | Value | Note |
+| --- | --- | --- |
+| `protocol.Version0` | `100` | Defined but not implemented by any serializer. |
+| `protocol.Version1` | `200` | The only working value. Pass this to `NewAliceDkg`, `Result`, and the `Encode*`/`Decode*` helpers. |
+
+The source explains the numbering: *"versions will increment in 100 intervals, to leave room for adding other versions in between them if it is ever needed in the future."* Note the doc comment on `Version1` reads "Version1 is version 2!" — that is a copy-paste slip in the comment, not a semantic claim; the value is `200`.
+
+:::warning[`Version0` is a dead constant, and the two version checks disagree]
+No serializer implements a `Version0` layout. Constructing an iterator with it fails at the first round:
+
+```go
+bob := dklsv1.NewBobDkg(curves.K256(), protocol.Version0)
+m, err := bob.Next(nil) // m == nil, err == "only version 1 is supported"
+```
+
+The DKG and sign serializers gate on strict equality (`if version != protocol.Version1`). The refresh serializers instead use `versionIsSupported`, which rejects only `messageVersion < protocol.Version1` — so a hypothetical `300` would sail past the refresh check and then fail somewhere deeper. Pass `protocol.Version1` everywhere, never hardcode `200`, and store the version alongside any persisted keyshare.
+:::
+
+### Sentinel errors
+
+```go
+var (
+	ErrNotInitialized   = fmt.Errorf("object has not been initialized")
+	ErrProtocolFinished = fmt.Errorf("the protocol has finished")
+)
+```
+
+Those two are the complete set. `ErrProtocolFinished` is returned by `Next` once the step list is exhausted. `ErrNotInitialized` is returned by `Result` when the iterator's inner protocol object is nil — i.e. you constructed the wrapper but the underlying `dkg.Alice`/`dkg.Bob` was never built.
+
+Both are `fmt.Errorf` values with no wrapping, so `errors.Is` and `==` are equivalent for them. The repository's own loops use `!=`; `errors.Is` is the better habit for your code.
+
+## The crank pattern
+
+Two `Iterator`s pass one `*protocol.Message` back and forth. Whatever `first.Next` returns becomes the input to `second.Next`, and vice versa, until both report `ErrProtocolFinished`.
+
+<Steps>
+  <Step title="Construct both participants">
+    Both sides need the same `*curves.Curve` and the same version. For DKG that is all the input there is.
+  </Step>
+  <Step title="Call Next on the first speaker with a nil message">
+    **Who speaks first depends on the protocol.** For DKLs18 DKG, Bob starts. For sign and refresh, Alice starts. Getting this backwards makes the first round fail on an unexpected input.
+  </Step>
+  <Step title="Feed each output into the other party">
+    The message returned by one `Next` is the input to the other's `Next`. This is where your transport goes: `EncodeMessage` on the way out, `DecodeMessage` on the way in.
+  </Step>
+  <Step title="Stop when both report ErrProtocolFinished">
+    Not one — both. A participant can finish a round earlier than its peer, so the loop condition is a conjunction of two "still not finished" tests.
+  </Step>
+  <Step title="Pull the output with Result">
+    `Result(version)` hands back a `*Message` carrying the serialized output. Feed it to the package's `Decode*` helper to get a typed struct.
+  </Step>
+</Steps>
+
+```go title="crank.go"
+package main
+
+import (
+	"errors"
+	"fmt"
+
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/core/protocol"
+	"github.com/sonr-io/crypto/tecdsa/dklsv1"
+)
+
+// crank drives two Iterators against each other until both are finished.
+// `first` is whoever speaks first: Bob for DKG, Alice for sign and refresh.
+func crank(first, second protocol.Iterator) error {
+	var (
+		msg       *protocol.Message
+		firstErr  error
+		secondErr error
+	)
+
+	for !errors.Is(firstErr, protocol.ErrProtocolFinished) ||
+		!errors.Is(secondErr, protocol.ErrProtocolFinished) {
+
+		msg, firstErr = first.Next(msg)
+		if firstErr != nil && !errors.Is(firstErr, protocol.ErrProtocolFinished) {
+			return firstErr
+		}
+
+		msg, secondErr = second.Next(msg)
+		if secondErr != nil && !errors.Is(secondErr, protocol.ErrProtocolFinished) {
+			return secondErr
+		}
+	}
+	return nil
+}
+
+func main() {
+	curve := curves.K256()
+
+	alice := dklsv1.NewAliceDkg(curve, protocol.Version1)
+	bob := dklsv1.NewBobDkg(curve, protocol.Version1)
+
+	// Bob speaks first for DKG.
+	if err := crank(bob, alice); err != nil {
+		panic(err)
+	}
+
+	aliceResult, err := alice.Result(protocol.Version1)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(aliceResult.Protocol, aliceResult.Version, len(aliceResult.Payloads))
+	// DKLs18-DKG 200 1
+
+	out, err := dklsv1.DecodeAliceDkgResult(aliceResult)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(out.PublicKey.CurveName()) // secp256k1
+}
+```
+
+This is exactly the shape of `mpc.RunProtocol(firstParty, secondParty)` and of `runIteratedProtocol` in `tecdsa/dklsv1`'s own tests. `mpc.CheckIteratedErrors(aErr, bErr)` is the helper that collapses the two returned errors into a single `error` (nil when both are `ErrProtocolFinished`).
+
+:::danger[`Result` returns `(nil, nil)` if the protocol has not finished]
+Calling `Result` on a fresh, un-cranked iterator returns a **nil message and a nil error** — the completion check comes before the initialization check. Verified against `dklsv1.AliceDkg.Result`:
+
+```go
+m, err := dklsv1.NewAliceDkg(curve, protocol.Version1).Result(protocol.Version1)
+// m == nil, err == nil
+```
+
+Every `Decode*` helper will then nil-dereference on `m.Payloads`. Always nil-check the message, not just the error.
+:::
+
+## Crossing a real network
+
+Over a wire you serialize the envelope. `EncodeMessage` produces a base64-encoded JSON string:
+
+```go
+wire, err := protocol.EncodeMessage(msg) // base64(json(msg))
+if err != nil {
+	return err
+}
+// ... send `wire` to the peer ...
+```
+
+:::danger[`DecodeMessage` panics on any non-trivial message — do not use it]
+`Message.UnmarshalJSON` decodes into a `map[string]any` and then type-asserts the values:
+
+```go
+case "payloads":
+	m.Payloads = v.(map[string][]byte)   // v is always map[string]interface{}
+case "metadata":
+	m.Metadata = v.(map[string]string)   // same problem
+```
+
+`encoding/json` never produces `map[string][]byte` or `map[string]string` when decoding into `any` — it produces `map[string]interface{}`. So the assertion always fails, and because it is an unchecked single-value assertion it **panics** rather than erroring.
+
+Reproduced against the current source: encoding a message with one payload succeeds, and decoding it panics with
+
+```
+interface conversion: interface {} is map[string]interface {}, not map[string][]uint8
+```
+
+`DecodeMessage` has **zero callers inside this repository**, which is why the defect has survived — `mpc` calls `EncodeMessage` on the way out but never `DecodeMessage` on the way in.
+
+**Workaround.** Do not call `protocol.DecodeMessage`. Because `Message` has correct `json` struct tags, plain `encoding/json` against a *shadow struct* works fine — you just have to bypass the broken method:
+
+```go
+type wireMessage struct {
+	Payloads map[string][]byte `json:"payloads"`
+	Metadata map[string]string `json:"metadata"`
+	Protocol string            `json:"protocol"`
+	Version  uint              `json:"version"`
+}
+
+func decode(s string) (*protocol.Message, error) {
+	bz, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return nil, err
+	}
+	var w wireMessage
+	if err := json.Unmarshal(bz, &w); err != nil {
+		return nil, err
+	}
+	return &protocol.Message{
+		Payloads: w.Payloads,
+		Metadata: w.Metadata,
+		Protocol: w.Protocol,
+		Version:  w.Version,
+	}, nil
+}
+```
+
+(`EncodeMessage` is fine — `MarshalJSON` uses a type alias and produces correct output, with `[]byte` payloads base64-encoded per Go's normal rules.)
+:::
+
+:::warning[The envelope carries no authentication or replay protection]
+`Message` is a plaintext struct. There is no MAC, no sender identity, and no session id — `Metadata` carries only `{"round": "N"}`, written by the serializer and never read back, so you cannot repurpose it without colliding with that key. The DKLs18 rounds are designed for an authenticated channel; the library gives you none. Run this over an authenticated, ordered, confidential transport and bind messages to a session at that layer. `mpc` layers AES-GCM over `EncodeMessage` output for keyshare storage (`mpc.EncryptKeyshare`), but that is at-rest encryption of a *result*, not channel security for the rounds.
+:::
+
+## Who consumes this
+
+<CardGroup cols={2}>
+  <Card title="Threshold ECDSA" href="/threshold/threshold-ecdsa" icon="users">
+    `tecdsa/dklsv1` — `AliceDkg`/`BobDkg`, `AliceSign`/`BobSign`, `AliceRefresh`/`BobRefresh` all implement `Iterator`, plus the `Encode*`/`Decode*` result helpers.
+  </Card>
+  <Card title="MPC enclave" href="/identity/mpc-enclave" icon="fingerprint">
+    `mpc` wraps the DKLs18 iterators with `RunProtocol`, `CheckIteratedErrors`, and keyshare encryption.
+  </Card>
+</CardGroup>
+
+Protocols that do **not** use `core/protocol`: `dkg/frost`, `dkg/gennaro`, `dkg/gennaro2p`, `ted25519`, and the `ot/*` packages all expose their own round methods directly. If you are working with those, you write the round sequencing by hand rather than in a crank loop.

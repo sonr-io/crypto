@@ -1,0 +1,174 @@
+---
+title: Randomized AEAD (AES-256-GCM)
+description: The aead package — AES-256-GCM with a self-generated nonce prepended to every ciphertext, plus the exact key size, tag size, and wire layout.
+sidebar:
+  order: 2
+  icon: lock-keyhole
+---
+
+`github.com/sonr-io/crypto/aead` is a thin, opinionated wrapper over the standard library's `crypto/cipher.NewGCM`. It exists to remove the two decisions people get wrong with raw AES-GCM: it fixes the key size at AES-256 and it generates and transports the nonce for you. The package doc comment cites NIST SP 800-38D.
+
+There is exactly one type, `AESGCMCipher`, and one constructor. There is no AES-128 mode, no key-unwrapping helper, no streaming interface, and no algorithm identifier on the wire.
+
+## When to use it
+
+Reach for `aead` whenever you have a 32-byte symmetric key and some bytes to protect: session payloads, encrypted records, wrapped blobs, anything where you want confidentiality plus integrity and you can afford a fresh random nonce per message.
+
+Do **not** use it when:
+
+- You need the ciphertext to be a stable function of the plaintext (e.g. an encrypted database column you still have to query by equality). Use [`daed`](/symmetric/deterministic-aead) instead.
+- You will encrypt an enormous number of messages under a single key. A random 96-bit nonce is subject to the birthday bound, so nonce collisions become non-negligible after roughly 2^32 messages; rotate keys long before that.
+- You need to encrypt a stream too large to hold in memory. `Encrypt` and `Decrypt` are one-shot over full slices.
+
+## Constants
+
+All three constants are plain `int` literals in `aes_gcm.go`.
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `aead.NonceSize` | `12` | 96-bit GCM nonce — the size GCM is fastest with, and the only size accepted |
+| `aead.TagSize` | `16` | 128-bit GCM authentication tag |
+| `aead.KeySize` | `32` | AES-256 key size, and the **only** accepted key length |
+
+:::info[32 bytes or nothing]
+`NewAESGCM` compares `len(key) != KeySize` and returns `invalid key size: expected 32 bytes, got N` for anything else. A 16-byte AES-128 key and a 24-byte AES-192 key are both rejected, which the package's own table-driven test asserts explicitly. This is stricter than `aes.NewCipher`, which would happily accept both.
+:::
+
+## Ciphertext layout
+
+This is the single most important fact about the package:
+
+```text
+Encrypt / EncryptWithNonce output:
+┌────────────────┬──────────────────────────┬──────────────────┐
+│ nonce 12 bytes │ ciphertext len(plaintext)│ GCM tag 16 bytes │
+└────────────────┴──────────────────────────┴──────────────────┘
+                 └── produced by gcm.Seal(nil, nonce, pt, aad) ┘
+```
+
+`Encrypt` generates the nonce itself from `crypto/rand` and **prepends** it to the sealed output. So:
+
+- `len(output) == NonceSize + len(plaintext) + TagSize` — the test asserts exactly this.
+- `Decrypt` expects that same layout. It slices `data[:12]` as the nonce and passes `data[12:]` (ciphertext *and* tag) to `gcm.Open`. You never manage nonces yourself, and you never store them separately.
+- The minimum valid ciphertext is `NonceSize + TagSize` = 28 bytes (an empty plaintext). Shorter input returns `invalid ciphertext length: minimum 28 bytes required` before any crypto runs.
+
+The AAD is **not** part of the output. Whatever you pass as `aad` must be reproducible at decrypt time from context you already have — a record ID, a version tag, a tenant name.
+
+## Usage
+
+Grounded in `aead/aes_gcm_test.go` (`TestAESGCMEncryptDecrypt`):
+
+```go encrypt.go
+package main
+
+import (
+	"crypto/rand"
+	"fmt"
+
+	"github.com/sonr-io/crypto/aead"
+)
+
+func main() {
+	// AES-256 key: exactly aead.KeySize bytes.
+	key := make([]byte, aead.KeySize)
+	if _, err := rand.Read(key); err != nil {
+		panic(err)
+	}
+
+	cipher, err := aead.NewAESGCM(key)
+	if err != nil {
+		panic(err)
+	}
+
+	plaintext := []byte("secret data")
+	aad := []byte("additional auth data") // authenticated, not encrypted, not stored
+
+	// Encrypt returns nonce || ciphertext || tag.
+	ct, err := cipher.Encrypt(plaintext, aad)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(len(ct) == aead.NonceSize+len(plaintext)+aead.TagSize) // true
+
+	// Decrypt takes that whole blob back, plus the identical AAD.
+	pt, err := cipher.Decrypt(ct, aad)
+	if err != nil {
+		panic(err) // "decryption and authentication failed: ..."
+	}
+	fmt.Printf("%s\n", pt) // secret data
+}
+```
+
+One `AESGCMCipher` value can be reused for many messages — the underlying `cipher.AEAD` is stateless and safe for concurrent use, and each `Encrypt` draws a fresh nonce.
+
+## API reference
+
+<TypeTable
+  type={{
+    "NewAESGCM(key []byte)": {
+      type: "(*AESGCMCipher, error)",
+      required: true,
+      description: "Constructor. Errors unless len(key) == 32. Wraps aes.NewCipher then cipher.NewGCM."
+    },
+    "Encrypt(plaintext, aad []byte)": {
+      type: "([]byte, error)",
+      required: true,
+      description: "Draws a fresh 12-byte nonce from crypto/rand, seals, and returns nonce || ciphertext || tag. Accepts empty plaintext and nil aad."
+    },
+    "Decrypt(data, aad []byte)": {
+      type: "([]byte, error)",
+      required: true,
+      description: "Expects nonce || ciphertext || tag. Errors if len(data) < 28, or if the tag or AAD does not verify."
+    },
+    "EncryptWithNonce(plaintext, aad, nonce []byte)": {
+      type: "([]byte, error)",
+      description: "Same output layout, but with a caller-supplied nonce. Errors unless len(nonce) == 12. See the danger note below."
+    },
+    "GetNonceSize()": {
+      type: "int",
+      description: "Always returns the NonceSize constant, 12."
+    },
+    "GetTagSize()": {
+      type: "int",
+      description: "Always returns the TagSize constant, 16."
+    }
+  }}
+/>
+
+`AESGCMCipher` has exactly one field, an unexported `gcm cipher.AEAD`. There is nothing to configure and nothing to inspect.
+
+## Caveats
+
+:::danger[EncryptWithNonce: never repeat a nonce under the same key]
+`EncryptWithNonce` hands you the nonce. Its own source comment says *"WARNING: Nonce reuse can compromise security. Use only for testing."* Take that literally.
+
+Encrypting two different plaintexts with the same `(key, nonce)` pair in GCM:
+
+- **Destroys confidentiality.** GCM is counter mode. The keystream is a function of the key and nonce alone, so two ciphertexts under a repeated nonce XOR to the XOR of their plaintexts.
+- **Destroys authenticity.** A single nonce repetition leaks enough information about the GHASH subkey to let an attacker forge tags for *other* messages under that key. This is not a graceful degradation; the whole key is burned.
+
+The method exists so you can reproduce fixed test vectors and satisfy protocols that specify the nonce externally. If you call it in production, the nonce must come from a source that provably never repeats for a given key — a persisted, atomically incremented counter, not a timestamp and not a hash of the plaintext. If you cannot prove uniqueness, call `Encrypt` and let it draw from `crypto/rand`, or move to [`daed`](/symmetric/deterministic-aead), which is designed to be safe without a nonce.
+:::
+
+:::warning[The AAD is your responsibility]
+`Decrypt` fails if the AAD differs by a single byte, and the AAD is not carried in the ciphertext. If you encrypt with a record ID as AAD and later change how that ID is serialized, every existing ciphertext becomes undecryptable. Pin the AAD encoding as strictly as you pin the wire format.
+:::
+
+:::warning[No algorithm or key identifier on the wire]
+The output is `nonce || ciphertext || tag` with no header. There is no version byte, no key ID, and no way to tell an `aead` ciphertext from any other 12-byte-prefixed blob. If you expect to rotate keys or migrate ciphers, add your own framing now — retrofitting it means re-encrypting everything.
+:::
+
+:::note[Error strings are wrapped, not typed]
+Every failure path returns a `fmt.Errorf` string; there are no sentinel error values to match with `errors.Is`. Authentication failure and malformed-length failure are distinguishable only by their message text. Treat any error from `Decrypt` as "this ciphertext is not authentic" and do not branch on the reason.
+:::
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Deterministic AEAD" href="/symmetric/deterministic-aead" icon="repeat">
+    When you cannot carry a nonce, or need identical ciphertext for identical plaintext.
+  </Card>
+  <Card title="Key derivation" href="/symmetric/key-derivation" icon="key-round">
+    Where the 32-byte key comes from: Argon2id for passwords, HKDF for high-entropy secrets.
+  </Card>
+</CardGroup>

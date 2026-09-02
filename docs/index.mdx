@@ -1,0 +1,122 @@
+---
+title: Sonr Crypto
+description: A Go cryptography library for threshold signatures, multi-party computation, zero-knowledge proofs, and decentralized identity — built on a single pluggable elliptic-curve abstraction.
+sidebar:
+  label: Overview
+  icon: book-open
+---
+
+`github.com/sonr-io/crypto` is the cryptographic foundation of Sonr. It bundles roughly 60 Go packages
+spanning elliptic-curve arithmetic, secret sharing, distributed key generation, threshold ECDSA and
+Ed25519, BLS and BBS+ signatures, range proofs, accumulators, homomorphic encryption, and the
+identity layer that turns a threshold key into a `did:key` identifier issuing UCAN capability tokens.
+
+Almost everything is generic over one abstraction — the `Curve` / `Point` / `Scalar` triple in
+[`core/curves`](/foundations/curves). Learn that first and the rest of the library reads consistently.
+
+## Install
+
+```bash
+go get github.com/sonr-io/crypto
+```
+
+The module requires **Go 1.24.7 or newer** and is licensed Apache 2.0.
+
+:::warning[Read before you deploy]
+This library carries no public security audit, and several packages contain stubs, known defects,
+or deliberately non-constant-time code paths. The
+[security notes](/reference/security) page enumerates every one we found while documenting it —
+read it before you build anything load-bearing on these primitives.
+:::
+
+## A first example
+
+Threshold ECDSA is the library's headline capability. The [`mpc`](/identity/mpc-enclave) package wraps
+the DKLs18 two-party protocol into a single value you can create, sign with, verify, and rotate:
+
+```go
+package main
+
+import (
+	"fmt"
+	"log"
+
+	"github.com/sonr-io/crypto/mpc"
+)
+
+func main() {
+	// Runs both sides of the 2-of-2 distributed key generation.
+	enclave, err := mpc.NewEnclave()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	sig, err := enclave.Sign([]byte("transfer 100 to bob"))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	ok, err := enclave.Verify([]byte("transfer 100 to bob"), sig)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println("public key:", enclave.PubKeyHex(), "valid:", ok)
+}
+```
+
+## The layers
+
+<CardGroup cols={2}>
+  <Card title="Foundations" href="/foundations" icon="layers">
+    The curve abstraction, modular arithmetic, hash-to-field, commitments, and the
+    round-driving protocol iterator every multi-party package uses.
+  </Card>
+  <Card title="Symmetric & Secrets" href="/symmetric" icon="lock">
+    AES-GCM and deterministic AES-SIV, Argon2id key derivation, HKDF and X25519,
+    plus the salt, password, and memory-hygiene helpers.
+  </Card>
+  <Card title="Signatures" href="/signatures" icon="pen-tool">
+    BLS aggregation and threshold keygen, BBS+ selective disclosure, ECDSA
+    canonicalization and RFC 6979 signing, VRFs, and chain-specific Schnorr schemes.
+  </Card>
+  <Card title="Threshold & MPC" href="/threshold" icon="users">
+    Shamir, Feldman, and Pedersen sharing; FROST and Gennaro DKG; two-party
+    threshold ECDSA; threshold Ed25519; and the oblivious transfer beneath them.
+  </Card>
+  <Card title="Zero-Knowledge" href="/zero-knowledge" icon="eye-off">
+    Schnorr proofs of knowledge, pairing-based accumulators for set membership,
+    Bulletproofs range proofs, and Paillier homomorphic encryption.
+  </Card>
+  <Card title="Identity & Authorization" href="/identity" icon="fingerprint">
+    `did:key` encoding, the MPC enclave, UCAN capability tokens, ECIES payload
+    encryption, and WebAssembly module signing.
+  </Card>
+</CardGroup>
+
+## Choosing a primitive
+
+| Goal | Reach for |
+| --- | --- |
+| Sign with a key that never exists in one place | [Threshold ECDSA](/threshold/threshold-ecdsa) or the [MPC enclave](/identity/mpc-enclave) |
+| Produce a standard Ed25519 signature from shares | [Threshold Ed25519](/threshold/threshold-ed25519) |
+| Aggregate many signatures into one | [BLS](/signatures/bls) |
+| Prove attributes without revealing them | [BBS+](/signatures/bbs) |
+| Prove a hidden value lies in a range | [Bulletproofs](/zero-knowledge/bulletproof) |
+| Prove set membership with a constant-size witness | [Accumulator](/zero-knowledge/accumulator) |
+| Add ciphertexts without decrypting | [Paillier](/zero-knowledge/paillier) |
+| Split an existing secret among holders | [Secret sharing](/threshold/secret-sharing) |
+| Derive a key from a password | [Argon2id](/symmetric/key-derivation) |
+| Encrypt a payload to a public key | [ECIES](/identity/ecies) |
+| Delegate scoped authority to another party | [UCAN](/identity/ucan) |
+
+## Where to next
+
+<CardGroup cols={2}>
+  <Card title="Getting started" href="/getting-started" icon="rocket">
+    Install the module, pick a curve, and understand the conventions shared across packages.
+  </Card>
+  <Card title="Package index" href="/reference/packages" icon="list">
+    Every importable package mapped to the page that documents it.
+  </Card>
+</CardGroup>

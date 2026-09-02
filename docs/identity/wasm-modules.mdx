@@ -1,0 +1,444 @@
+---
+title: WASM Module Signing
+description: Ed25519 code signing and SHA-256 hash pinning for WebAssembly module bytes — supply-chain verification, not a JavaScript binding layer.
+sidebar:
+  order: 6
+  icon: package-check
+---
+
+## This is not a js/wasm binding layer
+
+The package name misleads. `github.com/sonr-io/crypto/wasm` contains no `//go:build js,wasm`
+constraint, does not import `syscall/js`, and exposes nothing that runs inside a browser. Verified
+by reading both source files (`signer.go`, `verifier.go`): the only imports are `crypto/ed25519`,
+`crypto/rand`, `crypto/sha256`, `encoding/base64`, `encoding/hex`, `encoding/json`, `fmt`, `sync`,
+and `time`.
+
+What it actually is: **Ed25519 code signing and SHA-256 hash pinning over WebAssembly module bytes.**
+It answers one question — *is this `.wasm` blob the one I approved?* — before a host embeds and
+executes it. That is supply-chain verification, and it is plain Go that compiles and runs on any
+target.
+
+**Reach for this when** your program loads WASM plugins or modules from disk, a registry, or the
+network and must refuse anything it does not recognise.
+
+**Do not reach for this when** you need sandboxing or capability control over what a module can *do*
+once loaded — that is the runtime's job, not this package's. Verification tells you *which* code you
+are about to run, never what it will do.
+
+## Trust model
+
+<Steps>
+  <Step title="Provision trust out of band">
+    A `SignatureVerifier` starts empty and rejects everything with `"no trusted keys configured"`.
+    Verification is only as strong as the key set you install with `AddTrustedKey` /
+    `AddTrustedKeyFromHex`. Those public keys must reach the verifier through a channel you already
+    trust — baked into the binary, delivered by your config management, pinned in your deployment
+    manifest. A key learned from the same place as the module buys you nothing.
+  </Step>
+  <Step title="Sign at build time">
+    The publisher holds an Ed25519 private key and calls `SignModule` or `CreateSignatureManifest`
+    over the exact bytes that will be shipped.
+  </Step>
+  <Step title="Verify at load time">
+    The host recomputes the SHA-256 hash, compares it against the recorded one, and then checks the
+    Ed25519 signature against a trusted key.
+  </Step>
+  <Step title="Pin hashes as an independent check">
+    `HashVerifier` is deliberately separate from signing. A pinned hash constrains you to one exact
+    build even if a signing key is later compromised — it is a second, non-overlapping control, not a
+    weaker substitute for a signature.
+  </Step>
+</Steps>
+
+## Signing
+
+```go
+func NewSigner() (*Signer, error)
+func NewSignerFromPrivateKey(privateKey ed25519.PrivateKey) (*Signer, error)
+
+func (s *Signer) Sign(wasmBytes []byte) ([]byte, error)
+func (s *Signer) GetPublicKey() []byte
+func (s *Signer) GetPublicKeyHex() string
+func (s *Signer) ExportPrivateKey() []byte
+```
+
+`NewSigner` generates a fresh Ed25519 keypair from `crypto/rand`. `NewSignerFromPrivateKey` requires
+exactly `ed25519.PrivateKeySize` (64) bytes and derives the public key from it, erroring with
+`"invalid private key size: expected 64, got N"` otherwise. `Sign` produces a 64-byte
+`ed25519.Sign(priv, wasmBytes)` over the **raw module bytes** — not over the hash, and with no domain
+separation prefix.
+
+:::warning[`ExportPrivateKey` hands out the raw signing key]
+It returns `s.privateKey` directly — the live 64-byte `ed25519.PrivateKey` slice, not a copy. The
+caller can read it, and can also **mutate the signer's key in place** through the returned slice.
+Anything that receives this value can forge signatures for every module your key covers. Do not log
+it, serialize it, or pass it across a trust boundary; if you must persist a signing key, encrypt it
+with [AEAD](/symmetric/aead) and keep the plaintext lifetime as short as possible.
+:::
+
+## Signed modules
+
+```go
+type SignedModule struct {
+	Module    []byte    `json:"-"`         // WASM bytecode, EXCLUDED from JSON
+	Hash      string    `json:"hash"`      // hex SHA-256 of Module
+	Signature []byte    `json:"signature"` // Ed25519, 64 bytes
+	SignerID  string    `json:"signer_id"`
+	Timestamp time.Time `json:"timestamp"`
+	Version   string    `json:"version"`
+}
+
+func SignModule(signer *Signer, module []byte, signerID, version string) (*SignedModule, error)
+func VerifySignedModule(verifier *SignatureVerifier, module *SignedModule) error
+```
+
+`VerifySignedModule` runs two checks in order:
+
+1. Recompute the SHA-256 hash over `module.Module` and compare with `module.Hash`; mismatch yields
+   `"hash mismatch: expected …, got …"`.
+2. If `SignerID` is non-empty, `verifier.VerifyWithKey(SignerID, Module, Signature)`; otherwise
+   `verifier.Verify(Module, Signature)`, which tries every trusted key in turn.
+
+Grounded in `TestSignedModule` (`wasm/signer_test.go`):
+
+```go wasm_sign_verify.go
+package main
+
+import (
+	"fmt"
+
+	"github.com/sonr-io/crypto/wasm"
+)
+
+func main() {
+	// Publisher side.
+	signer, err := wasm.NewSigner()
+	if err != nil {
+		panic(err)
+	}
+	module := []byte("test wasm module") // in practice, the .wasm file contents
+
+	signed, err := wasm.SignModule(signer, module, "test-signer", "v1.0.0")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("hash:", signed.Hash)
+	publicKeyHex := signer.GetPublicKeyHex() // ship this out of band
+
+	// Host side: trust is provisioned from the out-of-band key, not from `signed`.
+	verifier := wasm.NewSignatureVerifier()
+	if err := verifier.AddTrustedKeyFromHex("test-signer", publicKeyHex); err != nil {
+		panic(err)
+	}
+	fmt.Println("trusted:", verifier.GetTrustedKeyIDs())
+
+	fmt.Println("ok:", wasm.VerifySignedModule(verifier, signed)) // nil
+
+	// Tampering is caught at the hash check.
+	signed.Module = []byte("tampered")
+	fmt.Println("tampered:", wasm.VerifySignedModule(verifier, signed)) // "hash mismatch"
+}
+```
+
+:::note[`Module` is not serialized]
+`SignedModule.Module` carries `json:"-"`, so marshalling a `SignedModule` drops the bytecode. The
+JSON is metadata only; ship the `.wasm` file alongside it and reattach it to `Module` before calling
+`VerifySignedModule`, or the hash check compares against an empty module.
+:::
+
+## The `SignatureVerifier`
+
+```go
+func NewSignatureVerifier() *SignatureVerifier
+func (v *SignatureVerifier) AddTrustedKey(keyID string, publicKey ed25519.PublicKey) error
+func (v *SignatureVerifier) AddTrustedKeyFromHex(keyID, publicKeyHex string) error
+func (v *SignatureVerifier) RemoveTrustedKey(keyID string)
+func (v *SignatureVerifier) GetTrustedKeyIDs() []string
+func (v *SignatureVerifier) Verify(wasmBytes, signature []byte) error
+func (v *SignatureVerifier) VerifyWithKey(keyID string, wasmBytes, signature []byte) error
+```
+
+`AddTrustedKey` requires exactly `ed25519.PublicKeySize` (32) bytes. The map is guarded by a
+`sync.RWMutex`, so a verifier is safe for concurrent use.
+
+Prefer `VerifyWithKey` over `Verify`. `Verify` iterates the whole trusted set and succeeds if *any*
+key validates, so it tells you the module is signed by someone you trust but not by **whom** — and it
+does not report which key matched. `VerifyWithKey` binds the check to an expected signer.
+
+## Manifests
+
+A manifest decouples signature metadata from the module file, and supports multiple signatures.
+
+```go
+type SignatureManifest struct {
+	ModuleHash  string            `json:"module_hash"`
+	Signatures  []SignatureEntry  `json:"signatures"`
+	TrustedKeys []TrustedKeyEntry `json:"trusted_keys"`
+	CreatedAt   time.Time         `json:"created_at"`
+	ExpiresAt   *time.Time        `json:"expires_at,omitempty"`
+}
+
+type SignatureEntry struct {
+	Signature string    `json:"signature"` // base64 std encoding
+	SignerID  string    `json:"signer_id"`
+	Timestamp time.Time `json:"timestamp"`
+	Algorithm string    `json:"algorithm"` // always "Ed25519"
+}
+
+type TrustedKeyEntry struct {
+	KeyID     string     `json:"key_id"`
+	PublicKey string     `json:"public_key"` // base64 std encoding
+	AddedAt   time.Time  `json:"added_at"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	Purpose   string     `json:"purpose"`    // e.g. "code-signing"
+}
+
+func CreateSignatureManifest(module []byte, signer *Signer, signerID string) (*SignatureManifest, error)
+func ExportManifest(manifest *SignatureManifest) ([]byte, error)
+func ImportManifest(data []byte) (*SignatureManifest, error)
+func VerifyWithManifest(module []byte, manifest *SignatureManifest) error
+```
+
+`CreateSignatureManifest` emits a manifest with exactly one `SignatureEntry` and one
+`TrustedKeyEntry` (`Purpose: "code-signing"`). `VerifyWithManifest` checks the module hash, then
+`ExpiresAt` on the manifest, then builds a fresh verifier from `manifest.TrustedKeys`, skipping any
+entry whose own `ExpiresAt` has passed.
+
+:::danger[`VerifyWithManifest` trusts the keys inside the manifest]
+It constructs its verifier from `manifest.TrustedKeys` — keys carried by the very document whose
+authenticity is in question. An attacker who can replace both the module and its manifest simply
+signs the replacement with their own key, lists that key in `TrustedKeys`, and
+`VerifyWithManifest` returns `nil`.
+
+`VerifyWithManifest` therefore establishes only **internal consistency**: this manifest describes
+this module. It establishes **no trust**. To get a real decision, verify against a key set you
+provisioned yourself:
+
+```go
+manifest, err := wasm.ImportManifest(manifestJSON)
+if err != nil {
+	return err
+}
+
+// Independent trust anchor — not manifest.TrustedKeys.
+verifier := wasm.NewSignatureVerifier()
+if err := verifier.AddTrustedKeyFromHex("release-key", pinnedPublicKeyHex); err != nil {
+	return err
+}
+
+// Confirm the manifest describes this module and has not expired.
+if err := wasm.VerifyWithManifest(module, manifest); err != nil {
+	return err
+}
+
+// Then check at least one signature against YOUR key.
+verified := false
+for _, entry := range manifest.Signatures {
+	sig, err := base64.StdEncoding.DecodeString(entry.Signature)
+	if err != nil {
+		continue
+	}
+	if verifier.VerifyWithKey("release-key", module, sig) == nil {
+		verified = true
+		break
+	}
+}
+if !verified {
+	return errors.New("no signature from a pinned key")
+}
+```
+:::
+
+:::warning[Expiry is optional and unauthenticated]
+`ExpiresAt` is a `*time.Time`; a `nil` value means "never expires" and `VerifyWithManifest` accepts
+it. Since the manifest is unsigned as a whole, an attacker rewriting the manifest can also clear or
+extend `ExpiresAt`. Only the individual `Signature` values are cryptographically protected, and each
+covers the module bytes alone — not `ModuleHash`, not `SignerID`, not `Timestamp`, and not any
+expiry field.
+:::
+
+## Hash pinning
+
+```go
+func NewHashVerifier() *HashVerifier
+func (v *HashVerifier) ComputeHash(wasmBytes []byte) string      // hex SHA-256
+func (v *HashVerifier) AddTrustedHash(name, hash string)
+func (v *HashVerifier) GetTrustedHash(name string) (string, bool)
+func (v *HashVerifier) VerifyHash(name string, wasmBytes []byte) error
+func (v *HashVerifier) VerifyHashWithFallback(name string, wasmBytes []byte, fallbackHashes []string) error
+func (v *HashVerifier) ClearTrustedHashes()
+```
+
+`VerifyHash` errors with `"no trusted hash found for WASM module: <name>"` when the name is unknown —
+so an unregistered module is denied by default, which is the right behaviour. The map is
+`sync.RWMutex`-guarded.
+
+:::danger[`VerifyHashWithFallback` mutates your pin set]
+On a fallback match it calls `AddTrustedHash(name, computedHash)`, **overwriting the pinned hash for
+that name**:
+
+```go
+for _, fallbackHash := range fallbackHashes {
+	if computedHash == fallbackHash {
+		v.AddTrustedHash(name, computedHash) // pin replaced
+		return nil
+	}
+}
+```
+
+Every subsequent `VerifyHash(name, …)` now accepts the fallback build and rejects the original. Two
+consequences:
+
+- Pinning becomes trust-on-first-use with silent promotion. If the fallback list is ever wider than
+  you intended — read from config, a response body, a rollback table — the pin follows it.
+- The change is invisible: nothing is returned or logged to say the pin moved.
+
+If you need to accept several builds, keep them in your own set and call `VerifyHash` (or compare
+`ComputeHash` output) against each, so the pin set stays under your control.
+:::
+
+## Hash chains
+
+```go
+type HashEntry struct {
+	Version      string `json:"version"`
+	Hash         string `json:"hash"`
+	PreviousHash string `json:"previous_hash"`
+	Timestamp    int64  `json:"timestamp"`
+}
+
+func NewHashChain() *HashChain
+func (hc *HashChain) AddEntry(version, hash string, timestamp int64) error
+func (hc *HashChain) GetLatestEntry() (*HashEntry, error)
+func (hc *HashChain) VerifyChain() error
+```
+
+`AddEntry` appends an entry whose `PreviousHash` is copied from the previous entry's `Hash` (empty
+for the first). `VerifyChain` accepts an empty chain, requires the first entry's `PreviousHash` to be
+empty, and then checks that each `PreviousHash` equals the preceding `Hash`. `GetLatestEntry` returns
+a **copy** of the last entry, or `"hash chain is empty"`.
+
+:::warning[The chain is a linkage check, not a cryptographic commitment]
+`AddEntry` always sets `PreviousHash` correctly, so `VerifyChain` **cannot fail** for a chain built
+through `AddEntry`. It only becomes meaningful for a chain deserialized from an untrusted source —
+which is exactly how `TestHashChain_BrokenChain` exercises it, by assigning the internal slice
+directly.
+
+Even then, `PreviousHash` is a plain string field, not a hash *over* the previous entry. Nothing
+binds `Version` or `Timestamp` to anything, and no entry is signed. An attacker who can rewrite the
+chain can produce a self-consistent chain of their own choosing. Treat it as an audit-trail
+convenience for update ordering, and get your integrity from `SignatureVerifier` and `HashVerifier`.
+:::
+
+## `SecurityPolicy`
+
+<TypeTable
+  type={{
+    "RequireHashVerification": {
+      type: "bool",
+      required: true,
+      description: "Intended to require a hash check. NOT read by Validate.",
+      default: "true"
+    },
+    "RequireSignature": {
+      type: "bool",
+      required: true,
+      description: "Intended to require a signature. NOT read by Validate. Source comment: \"Will be enabled in next phase\".",
+      default: "false"
+    },
+    "AllowedHashes": {
+      type: "[]string",
+      required: true,
+      description: "Intended allow-list of module hashes. NOT read by Validate.",
+      default: "[] (empty)"
+    },
+    "MaxModuleSize": {
+      type: "int64",
+      required: true,
+      description: "Maximum module size in bytes. The ONLY field Validate enforces; skipped entirely when <= 0.",
+      default: "10485760 (10 MiB)"
+    },
+  }}
+/>
+
+:::danger[`Validate` only checks the size]
+`SecurityPolicy.Validate(wasmBytes []byte) error` is, in full:
+
+```go
+func (p *SecurityPolicy) Validate(wasmBytes []byte) error {
+	if p.MaxModuleSize > 0 && int64(len(wasmBytes)) > p.MaxModuleSize {
+		return fmt.Errorf("WASM module size %d exceeds maximum allowed size %d",
+			len(wasmBytes), p.MaxModuleSize)
+	}
+	return nil
+}
+```
+
+`RequireHashVerification`, `RequireSignature` and `AllowedHashes` are never read — not here, and
+nowhere else in the package. Setting `RequireSignature: true` and calling `Validate` gives you a
+size check and nothing else, while reading like an enforced signature requirement.
+
+`TestSecurityPolicy` asserts exactly this and no more: a 1 KiB module passes, an 11 MiB module fails.
+
+**Do not use `SecurityPolicy` as a gate.** Sequence the checks yourself:
+
+```go
+if err := policy.Validate(moduleBytes); err != nil { // size only
+	return err
+}
+if err := hashes.VerifyHash(name, moduleBytes); err != nil {
+	return err
+}
+if err := signatures.VerifyWithKey(signerID, moduleBytes, sig); err != nil {
+	return err
+}
+```
+:::
+
+## `VerificationError`
+
+A structured error type for reporting a failed check. It is exported and its `Error()` renders
+module, reason, expected and actual hash — but **no function in the package returns it**. Every
+failure path uses `fmt.Errorf` instead. Use it in your own verification wrapper if you want typed
+errors:
+
+```go
+return &wasm.VerificationError{
+	Module:       name,
+	ExpectedHash: expected,
+	ActualHash:   verifier.ComputeHash(moduleBytes),
+	Reason:       "pinned hash mismatch",
+}
+```
+
+## Caveats summary
+
+:::info[What the tests cover]
+`wasm/signer_test.go` and `wasm/verifier_test.go` are reasonably thorough for this package: signer
+construction and key-size validation, signing and tamper detection, trusted-key add/remove/list,
+`SignModule`/`VerifySignedModule`, manifest creation, `VerifyWithManifest` including hash mismatch
+and expiry, manifest JSON round trip, hash computation and pinning, fallback verification, hash
+chains including a broken chain, `SecurityPolicy` size limits, and `VerificationError` formatting.
+
+What they do not cover is the *semantics* of the gaps above: no test asserts that
+`RequireSignature: true` is enforced (it is not), or that `VerifyWithManifest` establishes trust (it
+does not), or that a fallback match leaves the pin set unchanged (it does not).
+:::
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="AEAD" href="/symmetric/aead" icon="lock">
+    Encrypting a signing key at rest.
+  </Card>
+  <Card title="Signatures" href="/signatures" icon="fingerprint">
+    Ed25519's siblings, and when a different signature scheme fits better.
+  </Card>
+  <Card title="Security Notes" href="/reference/security" icon="triangle-alert">
+    Every stub and defect in the module, in one place.
+  </Card>
+  <Card title="Identity Overview" href="/identity" icon="fingerprint">
+    How this fits with enclaves, DIDs and capability tokens.
+  </Card>
+</CardGroup>

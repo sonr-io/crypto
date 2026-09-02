@@ -1,0 +1,196 @@
+---
+title: Deterministic AEAD (AES-SIV)
+description: The daed package — AES-SIV-CMAC per RFC 5297 with a mandatory 64-byte key. Nonce-free and misuse-resistant, at the price of leaking plaintext equality.
+sidebar:
+  order: 3
+  icon: repeat
+---
+
+`github.com/sonr-io/crypto/daed` implements AES-SIV-CMAC as specified in [RFC 5297](https://tools.ietf.org/html/rfc5297). "DAED" is deterministic authenticated encryption with associated data: same key, same plaintext, same associated data, byte-identical ciphertext, every time. There is no nonce parameter and nothing to keep unique.
+
+The implementation is a port of Tink's `subtle` AES-SIV — the test file even aliases the import as `subtle` and loads Wycheproof vectors — and it is restricted to a **single** associated-data component, unlike the general SIV construction which takes a vector of headers.
+
+## The trade
+
+Randomized AEAD like [`aead`](/symmetric/aead) hides everything, but only because a fresh nonce makes every ciphertext unique. That safety is contingent: repeat the nonce once and AES-GCM collapses. AES-SIV removes the nonce entirely by deriving the IV from the message itself (the S2V PRF over the associated data and the plaintext), then running AES-CTR with that IV.
+
+What you get:
+
+- **Nothing to keep unique.** No nonce store, no counter, no rand call on the encrypt path.
+- **Misuse resistance.** There is no parameter you can repeat to break it.
+- **Stable ciphertext.** You can index it, dedupe it, or use it as a lookup key.
+
+What you pay:
+
+- **Plaintext equality leaks.** Two records that encrypt to the same bytes had the same plaintext and the same associated data. An observer learns that without touching the key.
+
+:::warning[Deterministic means equality is public]
+If you deterministically encrypt an email address column, anyone with read access to the ciphertexts can count distinct users, spot duplicate accounts, join across tables, and — with a guessable domain — confirm a guess by encrypting a candidate and comparing. Deterministic encryption is *searchable*, and searchable is the same thing as *leaky*. Vary the associated data per row (a row ID, a tenant ID) when you want equality confined to a scope, and reach for randomized [`aead`](/symmetric/aead) whenever equality itself is sensitive.
+:::
+
+## When to use it
+
+Good fits:
+
+- **Wrapping key material.** Encrypting a data key under a key-encryption key, where there is no room in the format for a nonce and no natural place to store one.
+- **Deterministic encryption of identifiers.** An opaque token or blind index that you must still be able to look up by equality.
+- **Dedupe-able ciphertext.** Content-addressed storage where identical inputs should collapse to one object.
+- **Protocols that give you no nonce channel.** Fixed-width fields, legacy record formats, anything where the only bytes you control are the ciphertext.
+
+Bad fits: message payloads, session data, anything user-visible and repeated, and anything where two equal plaintexts appearing twice would be a disclosure.
+
+## Constants and key size
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `daed.AESSIVKeySize` | `64` | The **only** accepted key length: 512 bits |
+
+The 64-byte key is a double-length key and it is not padding. `NewAESSIV` splits it as `K1 = key[:32]` (the CMAC/S2V key, used to build the AES cipher for the PRF) and `K2 = key[32:]` (the CTR encryption key). RFC 5297 requires the MAC and encryption keys to be the same size, so a 256-bit security level means 2 × 256 bits of key material.
+
+The package's doc comment explains *why* 64 and not 32, and this is the one place the source names a paper, so it is worth repeating verbatim in substance: Chatterjee, Menezes and Sarkar's tightness analysis (Section 5.1) shows AES-SIV is attackable in the multi-user setting — given the encryption of one message under `k` different keys, a MAC key can be recovered in time `2^b / k` for MAC-key size `b`. That makes 128-bit MAC keys insufficient, and since 192-bit AES keys are not supported, the key must be 2 × 256 bits.
+
+`NewAESSIV` rejects every other length with `aes_siv: invalid key size N` — the package's `TestAESSIV_KeySizes` walks every prefix length from 0 to 300+ and asserts that exactly 64 is accepted.
+
+## Ciphertext layout
+
+```text
+EncryptDeterministically output:
+┌────────────────────┬───────────────────────────┐
+│ SIV / tag 16 bytes │ ciphertext len(plaintext) │
+└────────────────────┴───────────────────────────┘
+  = S2V(plaintext, ad)   = AES-CTR(K2, masked SIV)
+```
+
+The synthetic IV goes **first** and doubles as the authentication tag. Output length is always `len(plaintext) + 16`. An empty plaintext produces a 16-byte ciphertext, and `DecryptDeterministically` rejects anything shorter than 16 bytes with `aes_siv: ciphertext is too short`.
+
+Decryption decrypts first, then recomputes S2V over the recovered plaintext and compares it to the stored SIV byte-by-byte with an accumulating XOR. A mismatch returns `aes_siv: invalid ciphertext`.
+
+## Usage
+
+Grounded in `daed/aes_siv_test.go` (`TestAESSIV_EncryptDecrypt`):
+
+```go deterministic.go
+package main
+
+import (
+	"bytes"
+	"encoding/hex"
+	"fmt"
+
+	"github.com/sonr-io/crypto/daed"
+)
+
+func main() {
+	// 64 bytes = AESSIVKeySize. Two 32-byte halves: CMAC key, then CTR key.
+	keyStr := "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f" +
+		"00112233445566778899aabbccddeefff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"
+	key, err := hex.DecodeString(keyStr)
+	if err != nil {
+		panic(err)
+	}
+
+	a, err := daed.NewAESSIV(key)
+	if err != nil {
+		panic(err)
+	}
+
+	msg := []byte("Some data to encrypt.")
+	ad := []byte("Additional data")
+
+	ct, err := a.EncryptDeterministically(msg, ad)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(len(ct) == len(msg)+16) // true: SIV || ciphertext
+
+	// Determinism: identical inputs, identical output.
+	again, _ := a.EncryptDeterministically(msg, ad)
+	fmt.Println(bytes.Equal(ct, again)) // true
+
+	// Changing only the associated data changes the whole ciphertext.
+	other, _ := a.EncryptDeterministically(msg, []byte("Different data"))
+	fmt.Println(bytes.Equal(ct, other)) // false
+
+	pt, err := a.DecryptDeterministically(ct, ad)
+	if err != nil {
+		panic(err) // "aes_siv: invalid ciphertext"
+	}
+	fmt.Printf("%s\n", pt)
+}
+```
+
+Note the associated data is a full input to the PRF, not a side channel: it changes the SIV and therefore the CTR keystream, so the entire ciphertext changes. Using a per-row identifier as associated data is the standard way to scope the equality leak.
+
+## API reference
+
+<TypeTable
+  type={{
+    "NewAESSIV(key []byte)": {
+      type: "(*AESSIV, error)",
+      required: true,
+      description: "Constructor. Errors unless len(key) == 64. Splits the key, builds the AES cipher over K1, and precomputes the two CMAC subkeys."
+    },
+    "EncryptDeterministically(plaintext, associatedData []byte)": {
+      type: "([]byte, error)",
+      required: true,
+      description: "Returns SIV(16) || ciphertext. Accepts nil and empty plaintext and nil associated data. Errors only if the plaintext is within one AES block of max int."
+    },
+    "DecryptDeterministically(ciphertext, associatedData []byte)": {
+      type: "([]byte, error)",
+      required: true,
+      description: "Errors on ciphertext shorter than 16 bytes, or when the recomputed SIV does not match the stored one."
+    }
+  }}
+/>
+
+`AESSIV` exposes its internals as exported struct fields:
+
+<TypeTable
+  type={{
+    Cipher: { type: "cipher.Block", description: "AES cipher instance built over K1; used by the CMAC/S2V path." },
+    K1: { type: "[]byte", description: "First 32 bytes of the key — the CMAC/S2V key." },
+    K2: { type: "[]byte", description: "Last 32 bytes of the key — the AES-CTR encryption key." },
+    CmacK1: { type: "[]byte", description: "Precomputed CMAC subkey K1 (one GF(2^128) doubling of E(0))." },
+    CmacK2: { type: "[]byte", description: "Precomputed CMAC subkey K2 (a second doubling)." }
+  }}
+/>
+
+## Caveats
+
+:::danger[The AESSIV struct publishes raw key material]
+`K1`, `K2`, `CmacK1`, and `CmacK2` are exported fields holding the actual key bytes, and they are aliases into the slice you passed to `NewAESSIV` — not copies. Anything that can see an `*AESSIV` can read the key, and anything that mutates the slice you handed in mutates the cipher's key underneath it. Two consequences:
+
+- Never log, marshal, `fmt.Printf("%+v")`, or serialize an `AESSIV` value. `%v` on this struct prints your key.
+- Do not reuse or zero the input key slice while the `*AESSIV` is still in use. Conversely, `secure.Zeroize` on that slice *will* silently corrupt the live cipher.
+
+Treat these fields as private even though the compiler will not.
+:::
+
+:::warning[Decrypt discards an internal error]
+`DecryptDeterministically` calls `asc.ctrCrypt(...)` without checking its returned error — the only other call site, in `EncryptDeterministically`, does check it. In practice `ctrCrypt` can only fail if `aes.NewCipher(K2)` fails, which cannot happen for a key that already passed the 64-byte check in the constructor, so this is latent rather than exploitable. It is still an unchecked error on a decryption path, and the plaintext buffer would be returned uninitialized if it ever did fire. Always verify the returned error *and* validate the plaintext against your own schema.
+:::
+
+:::warning[No nonce is not the same as no risk]
+AES-SIV is misuse-resistant, not misuse-proof. It removes nonce management, but it does not remove key management: the multi-user attack quoted above is precisely a "one message, many keys" attack, so avoid encrypting a known fixed plaintext under a large fleet of independent keys. And nothing about determinism protects against replay — a stored ciphertext is valid forever, so bind freshness into the associated data if you need it.
+:::
+
+:::note[Wycheproof vectors are skipped by default]
+`TestAESSIV_WycheproofVectors` calls `t.Skip` unless the `TEST_SRCDIR` environment variable is set, pointing at a Bazel-style test data tree. In an ordinary `go test ./daed/...` run the cross-implementation vectors do not execute; only the round-trip and size tests do. Do not read a passing local test run as confirmation of RFC 5297 conformance.
+:::
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Randomized AEAD" href="/symmetric/aead" icon="lock-keyhole">
+    AES-256-GCM: the default when equality of plaintexts must stay hidden.
+  </Card>
+  <Card title="Key derivation" href="/symmetric/key-derivation" icon="key-round">
+    Producing the 64 bytes AES-SIV needs — ask HKDF for a 64-byte tag.
+  </Card>
+</CardGroup>
+
+To build a 64-byte AES-SIV key from one master secret, ask HKDF for 64 bytes rather than concatenating two independent 32-byte derivations:
+
+```go
+kek, err := subtle.ComputeHKDF("SHA256", master, salt, []byte("aes-siv key v1"), daed.AESSIVKeySize)
+```

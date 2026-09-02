@@ -1,0 +1,377 @@
+---
+title: ECDSA Utilities
+description: Canonical low-S form, malleability defence, fixed-width signature codecs, and RFC 6979-style deterministic signing on top of the standard library's crypto/ecdsa.
+sidebar:
+  order: 4
+  icon: check-check
+---
+
+The `ecdsa` package is a thin layer of utilities over the standard library. It does not define a key
+type, a curve, or a signature struct — it operates on `*ecdsa.PrivateKey`, `*ecdsa.PublicKey`,
+`elliptic.Curve`, and raw `*big.Int` pairs from `crypto/ecdsa`. Two problems are solved here that
+the standard library leaves to you:
+
+1. **Malleability.** ECDSA signatures are not unique per message. Two different byte strings verify
+   equally well, so signature bytes cannot be used as an identifier.
+2. **Nonce dependence.** `ecdsa.Sign` needs entropy at signing time, and a bad or repeated nonce
+   leaks the private key outright.
+
+Reach for this package when you store, index, deduplicate, or compare ECDSA signatures, or when you
+need signing to be reproducible on a device you do not trust to have a good RNG. Do **not** reach
+for it for ordinary sign-and-verify: `crypto/ecdsa` already does that, correctly and with a
+constant-time implementation. Everything here is `math/big` arithmetic and makes no constant-time
+claim.
+
+```go
+import "github.com/sonr-io/crypto/ecdsa"
+```
+
+:::note
+The import path collides with the standard library's `crypto/ecdsa`. In any file that uses both you
+must alias one — the examples below alias the standard library as `stdecdsa`.
+:::
+
+## Malleability, and why canonical form matters
+
+An ECDSA signature is a pair `(r, s)` over a curve of prime order `N`. Verification checks a
+relation that is symmetric in the sign of `s`:
+
+$$
+(r,\; s) \text{ valid} \iff (r,\; N - s) \text{ valid}
+$$
+
+Anyone who observes a valid signature can therefore produce a *second*, different, equally valid
+signature for the same message and the same key — without knowing the private key. The consequences
+are practical, not theoretical:
+
+- **Signature bytes are not an identifier.** Keying a database, a replay-protection cache, or a
+  transaction ID on raw signature bytes lets an attacker create an unbounded number of distinct
+  entries for one authorised action. This is the Bitcoin transaction-malleability bug.
+- **Byte equality is not signature equality.** `bytes.Equal(sigA, sigB) == false` does not mean two
+  parties signed different things.
+
+The fix everybody converged on is a **canonical form**: of the two valid `s` values, always use the
+smaller one, `s <= N/2`. This package calls that "canonical" and provides both the coercion and the
+strict rejection.
+
+<TypeTable
+  type={{
+    "IsCanonical(s, N *big.Int)": {
+      type: "bool",
+      description: "True when s <= N/2. Does not range-check s, and returns false for nil inputs.",
+    },
+    "MakeCanonical(r, s, N *big.Int)": {
+      type: "(*big.Int, *big.Int)",
+      description: "Returns (r, min(s, N-s)). No validation and no error. Returns its inputs unchanged if any is nil.",
+    },
+    "IsSignatureCanonical(r, s *big.Int, curve elliptic.Curve)": {
+      type: "bool",
+      description: "Full check: r in [1, N-1] AND s in [1, N/2]. False on any nil argument.",
+    },
+    "CanonicalizeSignature(r, s, curve)": {
+      type: "(*big.Int, *big.Int, error)",
+      description: "Range-checks both scalars, then returns copies with s reduced to canonical form. Errors on nil arguments or out-of-range r or s.",
+    },
+    "NormalizeSignature(r, s, curve)": {
+      type: "(*big.Int, *big.Int, error)",
+      description: "Currently a direct pass-through to CanonicalizeSignature. The name suggests more; the body does not do more.",
+    },
+    "RejectNonCanonical(r, s, curve)": {
+      type: "error",
+      description: "Strict mode: returns an error instead of coercing. Use this on ingress when you want to refuse malleated signatures outright.",
+    },
+    "ValidateAndCanonicalizeSignature(pub, hash, r, s)": {
+      type: "(*big.Int, *big.Int, error)",
+      description: "Canonicalizes, then verifies against pub and hash. Falls back to verifying the original pair if the canonical one fails. Errors if neither verifies.",
+    },
+    "CompareSignatures(r1, s1, r2, s2, curve)": {
+      type: "(bool, error)",
+      description: "Canonicalizes both pairs and compares. This is the correct way to ask whether two signatures are the same signature.",
+    },
+  }}
+/>
+
+`MakeCanonical` and `IsCanonical` take a bare `*big.Int` order rather than a curve, which makes them
+usable with secp256k1 or any other order you have on hand; the rest take an `elliptic.Curve`.
+
+:::warning[`MakeCanonical` returns `r` by reference]
+The internal helper returns the *same* `*big.Int` you passed for `r`, and returns your original `s`
+pointer unchanged when it was already canonical. Only the flipped case allocates. Mutating the
+result mutates your input. `CanonicalizeSignature` does not have this problem — it copies both
+scalars before touching them.
+:::
+
+### Choosing between coerce and reject
+
+<Tabs>
+  <Tab title="Coerce">
+    `CanonicalizeSignature` accepts a malleated signature and quietly normalises it. Right for a
+    verifier that must interoperate with signers you do not control, and for anything you are about
+    to store or hash.
+  </Tab>
+  <Tab title="Reject">
+    `RejectNonCanonical` refuses. Right for a consensus rule or a protocol where you have declared
+    that only canonical signatures are well-formed — coercion there would let two encodings of the
+    same intent both be "accepted", which is exactly the ambiguity you set out to remove.
+  </Tab>
+</Tabs>
+
+Grounded in `TestCanonicalizeSignature` and `TestIsSignatureCanonical`.
+
+```go canonical.go
+package main
+
+import (
+	stdecdsa "crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"fmt"
+	"log"
+	"math/big"
+
+	"github.com/sonr-io/crypto/ecdsa"
+)
+
+func main() {
+	curve := elliptic.P256()
+	priv, err := stdecdsa.GenerateKey(curve, rand.Reader)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	digest := sha256.Sum256([]byte("transfer 100 to bob"))
+	r, s, err := stdecdsa.Sign(rand.Reader, priv, digest[:])
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// stdlib Sign does not normalise, so first pin down which of the pair is low-S.
+	N := curve.Params().N
+	rLow, sLow, err := ecdsa.CanonicalizeSignature(r, s, curve)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Anyone can produce this second, equally valid, non-canonical signature.
+	sHigh := new(big.Int).Sub(N, sLow)
+	fmt.Println("high-S still verifies:",
+		stdecdsa.Verify(&priv.PublicKey, digest[:], rLow, sHigh)) // true
+
+	// Both collapse to the same canonical pair...
+	same, err := ecdsa.CompareSignatures(rLow, sLow, rLow, sHigh, curve)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("same signature:", same) // true
+
+	// ...and to the same fixed-width encoding.
+	a, err := ecdsa.SignatureBytes(rLow, sLow, curve)
+	if err != nil {
+		log.Fatal(err)
+	}
+	b, err := ecdsa.SignatureBytes(rLow, sHigh, curve)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("identical bytes:", string(a) == string(b), len(a)) // true 64
+
+	// Strict ingress: refuse rather than repair.
+	fmt.Println("high-S accepted:", ecdsa.IsSignatureCanonical(rLow, sHigh, curve)) // false
+	if err := ecdsa.RejectNonCanonical(rLow, sHigh, curve); err != nil {
+		fmt.Println("rejected:", err) // signature is not in canonical form
+	}
+}
+```
+
+## Fixed-width codecs
+
+`SignatureBytes` and `SignatureFromBytes` are a canonical, length-prefixed-free alternative to ASN.1
+DER. The layout is the concatenation of two big-endian, zero-padded scalars:
+
+| Field | Offset | Length |
+| --- | --- | --- |
+| `r` | `0` | `byteSize` |
+| `s` | `byteSize` | `byteSize` |
+
+where `byteSize = (curve.Params().BitSize + 7) / 8`. For P-256 that is 32, so a signature is exactly
+**64 bytes**; P-384 gives 96, P-521 gives 132.
+
+```go
+raw, err := ecdsa.SignatureBytes(r, s, curve)      // canonicalizes, then encodes
+r2, s2, err := ecdsa.SignatureFromBytes(raw, curve) // decodes, then canonicalizes
+```
+
+Both directions canonicalize, which is what makes the encoding a stable identifier: `(r, s)` and
+`(r, N-s)` produce byte-identical output, and a decode always yields a canonical pair.
+
+:::note[The size comes from `BitSize`, not from `N`]
+`byteSize` is derived from the curve's field bit size, while `r` and `s` are reduced mod `N`. For
+the NIST P-curves these agree. For a curve where the group order is meaningfully shorter than the
+field, the encoding still uses the field width — so do not assume this format matches another
+library's fixed-width convention without checking.
+:::
+
+:::warning[Not DER, not `[R || S]` with a recovery byte]
+This is a bare 2×`byteSize` concatenation. It is not ASN.1 DER (what `ecdsa.SignASN1` emits), and it
+carries no recovery id, so you cannot recover the public key from it the way Ethereum's 65-byte
+format allows. Do not feed these bytes to a verifier expecting either of those.
+:::
+
+## Deterministic signing
+
+`DeterministicSign` removes the randomness from ECDSA signing. Instead of drawing `k` from an RNG,
+it derives `k` from the private key and the message digest through an HMAC-DRBG construction in the
+style of [RFC 6979](https://datatracker.ietf.org/doc/html/rfc6979), using **HMAC-SHA-256** as the
+fixed underlying primitive.
+
+<TypeTable
+  type={{
+    "DeterministicSign(priv *ecdsa.PrivateKey, hash []byte)": {
+      type: "(*big.Int, *big.Int, error)",
+      description: "Derives k deterministically, signs, and returns an already-canonical (low-S) pair. Errors on a nil key, a nil D, or an empty hash.",
+    },
+    "VerifyDeterministic(pub *ecdsa.PublicKey, hash []byte, r, s *big.Int)": {
+      type: "bool",
+      description: "Range-checks r in [1, N-1] and s in [1, N/2], then delegates to crypto/ecdsa.Verify. Rejects a high-S signature that stdlib Verify would accept.",
+    },
+  }}
+/>
+
+Why determinism is worth having:
+
+- **No entropy dependence at signing time.** An embedded device, a freshly-booted VM, or a
+  deterministic test environment can sign correctly without a seeded CSPRNG.
+- **Reproducibility.** The same key and message always yield the same signature, so signatures can
+  be regenerated, diffed, and used as cache keys.
+- **No silent RNG failure.** A subtly broken RNG produces biased nonces, and nonce bias leaks the
+  private key over enough signatures. Removing the RNG removes that failure mode.
+
+Grounded in `TestDeterministicSign` and `TestCanonicalSignature`.
+
+```go deterministic.go
+package main
+
+import (
+	stdecdsa "crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"fmt"
+	"log"
+
+	"github.com/sonr-io/crypto/ecdsa"
+)
+
+func main() {
+	priv, err := stdecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	digest := sha256.Sum256([]byte("test message for deterministic signing"))
+
+	r1, s1, err := ecdsa.DeterministicSign(priv, digest[:])
+	if err != nil {
+		log.Fatal(err)
+	}
+	r2, s2, err := ecdsa.DeterministicSign(priv, digest[:])
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println("reproducible:", r1.Cmp(r2) == 0 && s1.Cmp(s2) == 0) // true
+
+	// Output is already low-S.
+	fmt.Println("canonical:", ecdsa.IsCanonical(s1, priv.Curve.Params().N)) // true
+
+	// Verifies with the standard library, and with the strict wrapper.
+	fmt.Println("stdlib ok:", stdecdsa.Verify(&priv.PublicKey, digest[:], r1, s1))
+	fmt.Println("strict ok:", ecdsa.VerifyDeterministic(&priv.PublicKey, digest[:], r1, s1))
+}
+```
+
+The output is normalised to low-S inside `signWithK` before it is returned, so you never need to
+call `MakeCanonical` on a `DeterministicSign` result.
+
+:::danger[Deterministic does not mean "nonce reuse is now safe"]
+Determinism eliminates the *accidental* nonce collision, not the consequence of one. If the same `k`
+is ever used for two different messages under the same key, both signatures share an `r`, and
+solving the two-equation system recovers the private key immediately:
+
+$$
+d = \frac{s_1 k - h_1}{r} \quad\text{with}\quad k = \frac{h_1 - h_2}{s_1 - s_2}
+$$
+
+The derivation binds `k` to both the private key and the message digest — `generateK` seeds the DRBG
+with `priv.D` and `hashToInt(hash)` — so two *different* messages under one key can never collide,
+which is the whole point. Two residual hazards remain:
+
+- Signing the **same digest** twice returns byte-identical output. That is correct behaviour, but it
+  means a signature is a stable fingerprint of `(key, message)`; do not treat repeated signatures as
+  evidence of repeated intent.
+- Deterministic signers are the standard target for **fault injection**: an attacker who can glitch
+  one of two signings of the same message obtains a correct and a faulted signature sharing `k`, and
+  the equation above applies. If your threat model includes physical access, pair determinism with
+  a verify-after-sign check.
+:::
+
+:::danger[Mostly RFC 6979-conformant — and the exception is silent]
+The derivation implements RFC 6979 steps (a) through (j), but where the RFC specifies
+`bits2octets(H(m))` — a **fixed-width**, mod-`q`-reduced octet string — the code feeds
+`bits2int(H(m)).Bytes()` into steps (f) and (h). `big.Int.Bytes()` drops leading zero bytes and does
+not reduce mod `q`.
+
+In the common case that makes no difference, and the implementation reproduces RFC 6979 vectors
+exactly. Checked against RFC 6979 A.2.5 (P-256 / SHA-256 / `"sample"`, key
+`C9AFA9D8…120F6721`), this package returns
+`r = EFD48B2AACB6A8FD1140DD9CD45E81D69D2C877B56AAF991C34D0EA84EAF3716` — the vector's value.
+
+It diverges whenever the digest, read as an integer, has fewer than `byteSize` significant
+bytes — that is, whenever `H(m)` begins with a zero byte, roughly one message in 256 on P-256.
+Compared against a reference RFC 6979 derivation on the digest
+`00EEECC1EB031E204A211DEC04B6B42B1F446802058873A1A8F36308FE62EC0D`:
+
+```
+rfc6979 r = 69E8682EEF48289BD67EE185E5756BC416F8D02900249AFC3AA19F9F1B28908F
+package r = 5B0E3B459095B47BD231012F545A4300962B6044AC43B3CAC4892C143AA9207B
+```
+
+The signature is still perfectly valid ECDSA and verifies everywhere; only the *nonce derivation*
+disagrees. But an intermittent, digest-dependent disagreement is worse than a consistent one: a
+cross-implementation compatibility test will pass 255 times out of 256. `deterministic_test.go`
+contains no RFC 6979 vectors at all — it only checks that repeated signing agrees with itself. Do
+not build a protocol in which two different libraries must derive the same `k`.
+:::
+
+:::warning[Not constant time]
+Every operation here is `math/big` arithmetic: `Div`, `Sub`, `Cmp`, `ModInverse`, `Mul`. `math/big`
+makes no constant-time guarantee, and `signWithK` performs the scalar multiplication and the modular
+inversion with ordinary variable-time code. On a machine where an attacker can measure your signing,
+prefer `crypto/ecdsa.SignASN1`, whose P-256 path is constant time. See
+[security notes](/reference/security).
+:::
+
+:::note[`VerifyDeterministic` is stricter than `stdecdsa.Verify`]
+It rejects `s > N/2`. A perfectly valid signature produced by a signer that does not normalise will
+fail here. That is deliberate — it is the strict-ingress policy applied to verification — but it
+means `VerifyDeterministic` is not a drop-in replacement for the standard library verifier.
+:::
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Threshold ECDSA" href="/threshold/threshold-ecdsa" icon="users">
+    Produce an ECDSA signature from key shares that never combine. The canonicalization helpers here
+    apply to its output too.
+  </Card>
+  <Card title="MPC enclave" href="/identity/mpc-enclave" icon="fingerprint">
+    The two-party ECDSA wrapper this library ships as its headline API.
+  </Card>
+  <Card title="Curve abstraction" href="/foundations/curves" icon="git-branch">
+    The library's own curve types — distinct from the `crypto/elliptic` types this package uses.
+  </Card>
+  <Card title="Security notes" href="/reference/security" icon="shield">
+    Constant-time gaps and standards deviations across the library.
+  </Card>
+</CardGroup>

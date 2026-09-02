@@ -1,0 +1,80 @@
+---
+title: Zero-Knowledge
+description: Four unrelated tools that all let a verifier learn a fact without learning the secret behind it — discrete-log proofs, set-membership accumulators, range proofs, and additively homomorphic encryption.
+sidebar:
+  label: Overview
+  order: 1
+  icon: eye-off
+---
+
+This section covers four packages that have almost nothing in common structurally, but which
+solve the same shape of problem: a party holds a secret and needs a counterparty to accept a
+statement about it without seeing it.
+
+They are not interchangeable, and picking the wrong one is expensive. `zkp/schnorr` proves
+you know a discrete log and nothing else. `accumulator` commits to a *set* and proves
+membership. `bulletproof` proves a committed number lies in a range. `paillier` is not a
+proof system at all — it is an encryption scheme that lets a third party compute on
+ciphertexts, and it ships with one proof (`PsfProof`) about the shape of its own public key,
+which is why it lives on this page rather than under symmetric or signature primitives.
+
+## Which one do I need
+
+| Goal | Package | What the verifier learns | What stays hidden |
+| --- | --- | --- | --- |
+| "I know the private key behind this public point" | `zkp/schnorr` | that some `x` with `Statement = x·B` exists and the prover knows it | `x` itself |
+| "My credential is in the issuer's current set" | `accumulator` | that the holder possesses a valid witness for *some* accumulated element | which element, and the rest of the set |
+| "This committed amount is between 0 and 2^n" | `bulletproof` | that the value behind a Pedersen commitment is in range | the value and the blinding factor |
+| "I know two vectors whose dot product is c" | `bulletproof` (inner-product layer) | the claimed inner product | both vectors |
+| "Compute on my data without seeing it" | `paillier` | nothing about the plaintexts | every plaintext |
+| "Your Paillier modulus is not malformed" | `paillier` (`PsfProof`) | that `N` is square-free | the factorization of `N` |
+
+## Maturity is uneven
+
+These four packages are at very different levels of usability, and this matters more than the
+cryptography when you are choosing between them.
+
+`zkp/schnorr` is the most mature: small, exercised across eight curves, and load-bearing
+inside this repo's own threshold ECDSA and oblivious-transfer stacks. `accumulator` is
+complete and well tested, with one dead branch in its API. `paillier` is complete for
+encryption but its proof layer has a missing length check. `bulletproof` implements the full
+protocol correctly but does not export enough of its own types to be callable from another
+package.
+
+:::warning[Read the caveats sections]
+Every page below ends with a caveats section that names concrete defects found in the source
+— unconstructible parameter structs, panics on malformed input, off-by-one range checks, and
+endianness assumptions. None of these are theoretical. Check them before you build on a
+package. Nothing in this module carries a security audit.
+:::
+
+## Shared foundation
+
+Every package here except `paillier` is generic over the curve abstraction in `core/curves`.
+`accumulator` additionally requires a *pairing* curve (`*curves.PairingCurve`, in practice
+BLS12-381), because its witness check is a pairing equation. `paillier` is the odd one out:
+it works over `math/big` integers modulo a composite, and its PSF proof takes a
+`crypto/elliptic` curve rather than a `core/curves` one.
+
+See [Curves](/foundations/curves) for the `Curve` / `Point` / `Scalar` types that appear in
+nearly every signature on these pages, and [Arithmetic](/foundations/arithmetic) for the
+`core` modular-arithmetic helpers that `paillier` is built on.
+
+<CardGroup cols={2}>
+  <Card title="Schnorr proofs" href="/zero-knowledge/schnorr" icon="badge-check">
+    Non-interactive proof of knowledge of a discrete log, with an optional commit-then-reveal
+    variant. The building block used by this module's own MPC protocols.
+  </Card>
+  <Card title="Accumulator" href="/zero-knowledge/accumulator" icon="list-checks">
+    Constant-size commitment to a set, constant-size membership witnesses, and a
+    zero-knowledge membership proof. Built for revocation lists.
+  </Card>
+  <Card title="Bulletproofs" href="/zero-knowledge/bulletproof" icon="ruler">
+    Logarithmic-size inner-product argument, and the range proof built on top of it.
+    Single and batched.
+  </Card>
+  <Card title="Paillier" href="/zero-knowledge/paillier" icon="calculator">
+    Additively homomorphic encryption over a composite modulus, plus the square-free proof
+    that keeps a malicious key from breaking protocols above it.
+  </Card>
+</CardGroup>

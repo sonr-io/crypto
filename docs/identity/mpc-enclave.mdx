@@ -1,0 +1,644 @@
+---
+title: MPC Enclave
+description: A batteries-included 2-of-2 threshold ECDSA wrapper over tecdsa/dklsv1 — keygen, signing, share refresh, serialization, and the security model it actually provides.
+sidebar:
+  order: 3
+  icon: shield
+---
+
+`github.com/sonr-io/crypto/mpc` is the convenience layer over
+[`tecdsa/dklsv1`](/threshold/threshold-ecdsa). Where `dklsv1` hands you two protocol iterators and
+makes you drive the message loop yourself, `mpc` hands you a single `Enclave` value with `Sign`,
+`Verify`, `Refresh`, `Marshal`, and `Unmarshal`. It is hardwired to a **2-of-2** DKLs18 threshold
+ECDSA key on **secp256k1**, signing over a **SHA3-256** digest.
+
+**Reach for this when** you want a signing key that is never materialised as a single scalar in
+memory, and you are willing to accept a fixed 2-of-2 shape and a secp256k1 curve.
+
+**Do not reach for this when** you need `t`-of-`n` for any other `t`/`n` (use
+[secret sharing](/threshold/secret-sharing) plus [DKG](/threshold/dkg)), a different curve, Ed25519
+signatures (see [threshold Ed25519](/threshold/threshold-ed25519)), or a live two-party protocol
+across a network — `NewEnclave` runs both sides locally in one process.
+
+## Read this first
+
+:::danger[`Enclave` is key management, not distributed trust]
+`mpc.NewEnclave()` runs *both* DKG parties in the calling process (`protocol.go`: it constructs
+`dklsv1.NewAliceDkg` and `dklsv1.NewBobDkg` and cranks them against each other with `RunProtocol`),
+then stores both results in one struct:
+
+```go
+type EnclaveData struct {
+	PubHex    string    `json:"pub_hex"`
+	PubBytes  []byte    `json:"pub_bytes"`
+	ValShare  Message   `json:"val_share"`   // validator / Alice share
+	UserShare Message   `json:"user_share"`  // user / Bob share
+	Nonce     []byte    `json:"nonce"`
+	Curve     CurveName `json:"curve"`
+}
+```
+
+`Sign` likewise builds both `GetAliceSignFunc(k, data)` and `GetBobSignFunc(k, data)` from the same
+`*EnclaveData` and runs them against each other locally. **An `Enclave` that can sign holds the
+entire signing capability.** `Marshal()` emits both shares as JSON.
+
+The threshold property — that compromising one party is not enough to forge a signature — only
+materialises if you split `ValShare` and `UserShare` across separate trust domains and drive the
+protocol with `RunProtocol` across the wire. In its packaged form, `mpc` buys you: a key that never
+exists as one scalar, and proactive share rotation via `Refresh()`. It does **not** buy you a
+distributed-trust boundary.
+:::
+
+## Lifecycle
+
+```go enclave_lifecycle.go
+package main
+
+import (
+	"fmt"
+
+	"github.com/sonr-io/crypto/mpc"
+)
+
+func main() {
+	// Keygen: runs both DKG sides locally, returns an Enclave holding both shares.
+	enclave, err := mpc.NewEnclave()
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("valid:", enclave.IsValid())
+	fmt.Println("pub:", enclave.PubKeyHex())
+
+	// Sign: two-party DKLs18 signing over SHA3-256(msg). 64 bytes, r || s.
+	msg := []byte("test message before refresh")
+	sig, err := enclave.Sign(msg)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("sig len:", len(sig)) // 64
+
+	ok, err := enclave.Verify(msg, sig)
+	fmt.Println("verified:", ok, err)
+
+	// Refresh: rotates both shares. The public key is invariant.
+	refreshed, err := enclave.Refresh()
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("pubkey unchanged:", refreshed.PubKeyHex() == enclave.PubKeyHex())
+
+	// Signatures cross-verify in both directions across the refresh boundary.
+	newSig, err := refreshed.Sign([]byte("test message after refresh"))
+	if err != nil {
+		panic(err)
+	}
+	preOK, _ := refreshed.Verify(msg, sig)
+	postOK, _ := enclave.Verify([]byte("test message after refresh"), newSig)
+	fmt.Println("old sig under new enclave:", preOK)
+	fmt.Println("new sig under old enclave:", postOK)
+
+	// Serialization: Marshal works. Unmarshal PANICS — see the callout below.
+	blob, err := enclave.GetData().Marshal()
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("marshalled bytes:", len(blob))
+}
+```
+
+Every assertion in that program was verified by running it. `TestEnclaveData_RefreshAndSign` in
+`mpc/enclave_test.go` is the source for the invariant public key and the bidirectional
+cross-verification.
+
+:::danger[`Unmarshal` panics on `Marshal` output]
+A marshalled enclave **cannot be read back**. `EnclaveData.Unmarshal` is `json.Unmarshal` into the
+struct, whose `ValShare`/`UserShare` fields are `*protocol.Message` — and
+[`protocol.Message`](/foundations/protocol) has a custom `UnmarshalJSON` with unchecked type
+assertions that can never hold:
+
+```go
+// core/protocol/protocol.go
+var obj map[string]any
+if err := json.Unmarshal(data, &obj); err != nil {
+	return err
+}
+for k, v := range obj {
+	switch k {
+	case "payloads":
+		m.Payloads = v.(map[string][]byte) // <- always the wrong dynamic type
+	case "metadata":
+		m.Metadata = v.(map[string]string) // <- likewise
+```
+
+Decoding into `map[string]any` yields `map[string]any` for a nested object, never
+`map[string][]byte`, so the assertion fails and the program **panics** rather than returning an
+error:
+
+```text
+panic: interface conversion: interface {} is map[string]interface {}, not map[string][]uint8
+	core/protocol/protocol.go:92
+	mpc/enclave.go:154 (EnclaveData.Unmarshal)
+```
+
+`TestEnclaveData_MarshalUnmarshal` in `mpc/enclave_test.go` currently **fails** with exactly this
+panic — confirmed by running `go test ./mpc/ -run TestEnclaveData_MarshalUnmarshal`. Note that
+`MarshalJSON` on `protocol.Message` is fine, so you can persist an enclave but not restore it
+through this path.
+
+The blast radius is **anything that JSON-decodes a `protocol.Message`**, not one specific helper.
+`mpc.EnclaveData.Unmarshal` reaches the panic through `encoding/json` calling
+`Message.UnmarshalJSON` directly, and `protocol.DecodeMessage` panics for the same underlying
+reason. `mpc.RestoreEncryptedEnclave` inherits it too, on top of already being broken for the
+reasons in the next section.
+
+Workarounds:
+
+1. Keep the live `Enclave` value in memory and avoid the JSON boundary entirely, or hand an
+   in-memory `*EnclaveData` to `mpc.RestoreEnclaveFromData` — it adopts the pointer and never
+   touches JSON.
+2. If you must persist, write your own codec. `protocol.EncodeMessage` works on the way out, but do
+   **not** pair it with `protocol.DecodeMessage`; decode into a shadow struct with the same JSON
+   tags as `protocol.Message` and copy the fields across yourself. See
+   [Foundations → Protocol](/foundations/protocol) for the full explanation and a worked decode.
+3. If you cannot avoid `Unmarshal`, wrap it in a `recover()` — it panics rather than returning an
+   error, so an error check alone will not save you.
+:::
+
+## The `Enclave` interface
+
+`Enclave` is satisfied by `*EnclaveData`, and `GetData()`/`GetEnclave()` are just casts between the
+two views of the same pointer.
+
+<TypeTable
+  type={{
+    "GetData": { type: "func() *EnclaveData", description: "Returns the receiver. Gives access to GetPubPoint, which is not on the interface." },
+    "GetEnclave": { type: "func() Enclave", description: "Returns the receiver as an Enclave. Identity function." },
+    "IsValid": { type: "func() bool", description: "True iff both ValShare and UserShare are non-nil. Does not validate the shares." },
+    "PubKeyHex": { type: "func() string", description: "Hex of the compressed public point (PubHex)." },
+    "PubKeyBytes": { type: "func() []byte", description: "The uncompressed 65-byte public point (PubBytes)." },
+    "Sign": { type: "func(data []byte) ([]byte, error)", description: "Runs 2-party DKLs18 signing. Returns 64 bytes, r || s." },
+    "Verify": { type: "func(data, sig []byte) (bool, error)", description: "ecdsa.Verify over SHA3-256(data). Errors only on malformed input; an invalid signature returns (false, nil)." },
+    "Refresh": { type: "func() (Enclave, error)", description: "Rotates both shares, returns a NEW Enclave. Does not mutate the receiver." },
+    "Encrypt": { type: "func(key []byte) ([]byte, error)", description: "AES-256-GCM over Marshal() output, using the enclave's stored Nonce." },
+    "Decrypt": { type: "func(key, encryptedData []byte) ([]byte, error)", description: "Inverse of Encrypt. Returns plaintext JSON; does not populate the receiver." },
+    "Marshal": { type: "func() ([]byte, error)", description: "encoding/json over EnclaveData — both shares included, in the clear." },
+    "Unmarshal": { type: "func(data []byte) error", description: "encoding/json into the receiver. PANICS on Marshal() output — see the callout above." },
+  }}
+/>
+
+:::note[The interface doc comments are shuffled]
+In `mpc/codec.go` the `Unmarshal` line is commented `// Verify returns true if the signature is valid`
+and `Marshal` is commented `// Serialize returns the serialized keyEnclave`. The behaviour is what
+the method names say; the comments are stale.
+:::
+
+`GetPubPoint()` is available on `*EnclaveData` but not on the interface:
+
+```go
+point, err := enclave.GetData().GetPubPoint() // curves.Point on k.Curve
+```
+
+It reconstructs the point with `curve.NewIdentityPoint().FromAffineUncompressed(k.PubBytes)`, which
+is why `PubBytes` must stay uncompressed.
+
+## Roles
+
+```go
+const (
+	RoleVal  = "validator"
+	RoleUser = "user"
+)
+
+type Role string
+```
+
+The mapping is fixed and worth memorising, because the field names and the protocol names differ:
+
+| Field | Role constant | DKLs18 party | Sign func | Refresh func |
+| --- | --- | --- | --- | --- |
+| `ValShare` | `RoleVal` | Alice | `GetAliceSignFunc` | `GetAliceRefreshFunc` |
+| `UserShare` | `RoleUser` | Bob | `GetBobSignFunc` | `GetBobRefreshFunc` |
+
+`Role` and the two constants are declared but nothing in the package consumes them — they are there
+for callers that need to label a share. Note the constants are untyped strings, not `Role` values.
+
+## Import and export
+
+`ImportEnclave` applies a variadic list of options and dispatches on which one was set. `Options`
+holds only unexported fields, so `ImportEnclave` (or `Options{}.Apply()`, which sees a zero value) is
+the intended entry point.
+
+<TypeTable
+  type={{
+    "WithInitialShares": {
+      type: "func(valKeyshare, userKeyshare Message, curve CurveName) ImportOption",
+      description: "Build a fresh enclave from two DKG results. Derives PubBytes/PubHex from the validator share and generates a new random 12-byte Nonce."
+    },
+    "WithEnclaveData": {
+      type: "func(data *EnclaveData) ImportOption",
+      description: "Adopt an existing *EnclaveData verbatim. Errors only if data is nil."
+    },
+    "WithEncryptedData": {
+      type: "func(data, key []byte) ImportOption",
+      description: "Intended to restore from Encrypt() output. Broken — see the callout below."
+    },
+  }}
+/>
+
+`Apply()` resolves in a fixed precedence: encrypted data first, then initial shares, then enclave
+data. `ImportEnclave` with zero options errors with `"no import options provided"`; with only
+`WithEnclaveData(nil)` it errors with `"enclave data cannot be nil"`.
+
+The three lower-level constructors are exported and callable directly:
+
+```go
+// Assemble from two protocol results (what NewEnclave does internally).
+e, err := mpc.BuildEnclave(valShare, userShare, mpc.Options{})
+
+// Adopt a deserialized struct.
+e, err := mpc.RestoreEnclaveFromData(data)
+
+// Decrypt and adopt. Does not work; see below.
+e, err := mpc.RestoreEncryptedEnclave(ciphertext, key)
+```
+
+:::warning[`BuildEnclave` with a bare `Options{}` records an empty curve]
+`BuildEnclave` copies `options.curve` into `EnclaveData.Curve`. A zero `Options` leaves that as the
+empty string. `CurveName("").Curve()` falls through to `curves.K256()`, so signing still works on
+secp256k1 — but the persisted JSON records `"curve": ""`. Prefer
+`mpc.ImportEnclave(mpc.WithInitialShares(val, user, mpc.K256Name))`, which sets it explicitly.
+:::
+
+:::danger[The encrypted-import path cannot succeed]
+`RestoreEncryptedEnclave` is unreachable-working by construction:
+
+```go
+func RestoreEncryptedEnclave(data []byte, key []byte) (Enclave, error) {
+	keyclave := &EnclaveData{}
+	err := keyclave.Unmarshal(data)      // <- JSON-parses the CIPHERTEXT
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal enclave: %w", err)
+	}
+	decryptedData, err := keyclave.Decrypt(key, data)
+	...
+}
+```
+
+`data` is the AES-256-GCM output of `Encrypt` — indistinguishable from random bytes. `json.Unmarshal`
+on it fails, and the function returns before ever decrypting. Even if that line were removed, the
+next one could not work either: `Decrypt` reads the nonce from `k.Nonce`, which is a *field of the
+still-encrypted struct* and is therefore nil at that point, so `aesgcm.Open` would fail on a
+zero-length nonce.
+
+Consequently `mpc.ImportEnclave(mpc.WithEncryptedData(ct, key))` also always fails, since `Apply()`
+routes straight to `RestoreEncryptedEnclave`. Nothing in the repository calls either one — grepping
+the module, the only references are the definitions themselves and the `Apply()` dispatch, and
+`mpc/enclave_test.go` never exercises them.
+
+**There is no working round trip through this package.** You can decrypt — but the plaintext is the
+JSON produced by `Marshal()`, and `Unmarshal` panics on it (see the previous section). Decryption on
+its own works if you keep the nonce:
+
+```go
+data := enclave.GetData()
+nonce := data.Nonce // you MUST persist this alongside the ciphertext
+
+ct, err := data.Encrypt(key)
+// ... later, in a fresh process ...
+shell := &mpc.EnclaveData{Nonce: nonce}
+plaintext, err := shell.Decrypt(key, ct) // plaintext == the original Marshal() JSON
+if err != nil {
+	return err
+}
+// plaintext CANNOT be fed to (*EnclaveData).Unmarshal — it panics.
+```
+
+`TestEnclaveData_EncryptDecrypt` passes precisely because it stops here: it compares the decrypted
+bytes against `Marshal()` output and never decodes them. To actually restore an enclave, encrypt and
+decode with your own codec as described in the panic callout above.
+:::
+
+## Encryption at rest
+
+`Encrypt` / `Decrypt` are AES-256-GCM. The key is derived by `GetHashKey`, which is
+`sha3.New256(key)` truncated to 32 bytes. The nonce is `EnclaveData.Nonce` — 12 random bytes
+generated **once**, at `BuildEnclave` time, and then reused for every call.
+
+:::danger[Fixed per-enclave nonce]
+GCM security collapses if a `(key, nonce)` pair is ever reused for two different plaintexts: the
+keystream repeats, XOR-ing two ciphertexts reveals the XOR of the plaintexts, and the GHASH
+authentication key becomes recoverable, which lets an attacker forge tags.
+
+Because `Nonce` is fixed for the enclave's whole lifetime, calling `Encrypt(key)` twice with the same
+`key` on **different** enclave contents — most obviously before and after a `Refresh()`, or after any
+field changes — reuses `(key, nonce)`. Encrypting the *same* bytes twice is merely deterministic;
+encrypting *different* bytes twice is a break.
+
+Mitigations, in order of preference:
+
+1. Do not use these methods. Marshal the enclave and encrypt with a fresh random nonce per operation
+   using [`aead`](/symmetric/aead).
+2. If you must use them, use a distinct `key` for every encryption, and never reuse a key across a
+   refresh.
+
+Note also that `Refresh()` returns a new `Enclave` with a new random nonce, while the original value
+keeps the old one — so the hazard is per-value, not per-key-lifetime.
+:::
+
+`EncryptKeyshare` / `DecryptKeyshare` are the single-share equivalents, and they take the nonce as an
+explicit parameter, which is the right shape:
+
+```go
+func EncryptKeyshare(msg Message, key []byte, nonce []byte) ([]byte, error)
+func DecryptKeyshare(msg []byte, key []byte, nonce []byte) ([]byte, error)
+func GetHashKey(key []byte) []byte // SHA3-256(key)[:32]
+```
+
+`EncryptKeyshare` runs `protocol.EncodeMessage(msg)` first, so it operates on the wire encoding of a
+`*protocol.Message`, not on JSON.
+
+## Refresh
+
+`Refresh()` runs the DKLs18 key-refresh protocol on both sides and returns a fresh `Enclave`:
+
+```go
+func (k *EnclaveData) Refresh() (Enclave, error) {
+	refreshFuncVal, _ := GetAliceRefreshFunc(k)
+	refreshFuncUser, _ := GetBobRefreshFunc(k)
+	return ExecuteRefresh(refreshFuncVal, refreshFuncUser, k.Curve)
+}
+```
+
+Three properties, all asserted in `TestEnclaveData_RefreshAndSign`:
+
+1. **Shares change.** Both `ValShare` and `UserShare` are replaced by the refresh outputs.
+2. **The public key does not.** `PubKeyHex()` and `PubKeyBytes()` are byte-identical before and after.
+3. **Signatures are interchangeable.** A signature made before the refresh verifies under the
+   refreshed enclave and vice versa, because verification only touches the public key.
+
+This is proactive security: an attacker who exfiltrated one share before the refresh holds a share
+that no longer combines with anything.
+
+:::warning[`Refresh` returns; it does not rotate in place]
+The receiver is unchanged. If you keep using the old value you keep using the old shares, and the old
+shares still sign valid signatures. Replace your reference and destroy the old serialization.
+:::
+
+## Driving the protocol yourself
+
+Everything above is assembled from these exported pieces. Use them when the two shares live in
+different processes and you need to shuttle `*protocol.Message` values between them.
+
+<TypeTable
+  type={{
+    "RunProtocol": {
+      type: "func(firstParty, secondParty protocol.Iterator) (error, error)",
+      description: "Cranks two iterators against each other until both return protocol.ErrProtocolFinished. Returns (aErr, bErr)."
+    },
+    "CheckIteratedErrors": {
+      type: "func(aErr, bErr error) error",
+      description: "Collapses RunProtocol's pair: nil if both are ErrProtocolFinished, otherwise the first real error."
+    },
+    "ExecuteSigning": {
+      type: "func(signFuncVal, signFuncUser SignFunc) ([]byte, error)",
+      description: "Runs both sign iterators, takes the USER side's result, decodes it, and serializes to 64 bytes."
+    },
+    "ExecuteRefresh": {
+      type: "func(refreshFuncVal, refreshFuncUser RefreshFunc, curve CurveName) (Enclave, error)",
+      description: "Runs both refresh iterators and re-imports the two results as a new enclave."
+    },
+    "GetAliceSignFunc": { type: "func(k *EnclaveData, bz []byte) (SignFunc, error)", description: "dklsv1.NewAliceSign on k.Curve with sha3.New256 over bz." },
+    "GetBobSignFunc": { type: "func(k *EnclaveData, bz []byte) (SignFunc, error)", description: "dklsv1.NewBobSign — hardcodes curves.K256(); see caveat." },
+    "GetAliceRefreshFunc": { type: "func(k *EnclaveData) (RefreshFunc, error)", description: "dklsv1.NewAliceRefresh on k.Curve." },
+    "GetBobRefreshFunc": { type: "func(k *EnclaveData) (RefreshFunc, error)", description: "dklsv1.NewBobRefresh — hardcodes curves.K256(); see caveat." },
+  }}
+/>
+
+Type aliases, from `mpc/codec.go`:
+
+```go
+type (
+	AliceOut    *dkg.AliceOutput
+	BobOut      *dkg.BobOutput
+	Point       curves.Point
+	Message     *protocol.Message
+	Signature   *curves.EcdsaSignature
+	RefreshFunc interface{ protocol.Iterator }
+	SignFunc    interface{ protocol.Iterator }
+)
+```
+
+Decoding DKG results:
+
+```go
+func GetAliceOut(msg *protocol.Message) (AliceOut, error)
+func GetBobOut(msg *protocol.Message) (BobOut, error)
+func GetAlicePublicPoint(msg *protocol.Message) (Point, error)
+func GetBobPubPoint(msg *protocol.Message) (Point, error)
+```
+
+Both parties derive the same public key, so `GetAlicePublicPoint` and `GetBobPubPoint` on the
+respective DKG outputs agree; `BuildEnclave` uses the Alice side.
+
+## Signature encoding
+
+```go
+func SerializeSignature(sig *curves.EcdsaSignature) ([]byte, error)
+func DeserializeSignature(sigBytes []byte) (*curves.EcdsaSignature, error)
+func GetECDSAPoint(pubKey []byte) (*curves.EcPoint, error)
+func VerifyWithPubKey(pubKeyCompressed, data, sig []byte) (bool, error)
+```
+
+`SerializeSignature` emits a **fixed 64-byte** buffer: `r` left-zero-padded to 32 bytes, then `s`
+left-zero-padded to 32 bytes. No `V` byte, no DER, no length prefix. `DeserializeSignature` rejects
+anything that is not exactly 64 bytes with
+`"invalid signature length: expected 64 bytes, got N"`. The `EcdsaSignature.V` field is left zero on
+the deserialize path.
+
+:::warning[`VerifyWithPubKey`'s parameter name is wrong]
+The parameter is named `pubKeyCompressed`, but it is passed to `GetECDSAPoint`, which slices
+`x = pubKey[1:33]` and `y = pubKey[33:]` — that is the **uncompressed** 65-byte layout. Pass
+`enclave.PubKeyBytes()` (uncompressed), not `PubKeyHex()`-decoded bytes (compressed). Supplying 33
+bytes yields `y = 0` and verification silently returns `false`.
+
+`GetECDSAPoint` also always uses `curves.K256()`, ignoring the enclave's `Curve` field, and does no
+length or on-curve check.
+:::
+
+Signatures are **not** compatible with [`keys.PubKey.Verify`](/identity/did-key), which requires a
+66-byte `V || R || S` layout.
+
+## `CurveName`
+
+```go
+type CurveName string
+
+const (
+	K256Name       CurveName = "secp256k1"
+	BLS12381G1Name CurveName = "BLS12381G1"
+	BLS12381G2Name CurveName = "BLS12381G2"
+	BLS12831Name   CurveName = "BLS12831"
+	P256Name       CurveName = "P-256"
+	ED25519Name    CurveName = "ed25519"
+	PallasName     CurveName = "pallas"
+	BLS12377G1Name CurveName = "BLS12377G1"
+	BLS12377G2Name CurveName = "BLS12377G2"
+	BLS12377Name   CurveName = "BLS12377"
+)
+```
+
+`Curve()` maps each name to a [`*curves.Curve`](/foundations/curves). `String()` is the underlying
+string. The mapping has two quirks worth knowing:
+
+| Name | Maps to | Note |
+| --- | --- | --- |
+| `BLS12831Name` | `curves.BLS12381G1()` | `"BLS12831"` is a transposition of 12381; aliased to G1 |
+| `BLS12377Name` | `curves.BLS12377G1()` | Aggregate name aliased to G1 |
+| *anything else* | `curves.K256()` | Silent default — including the empty string |
+
+:::danger[Only secp256k1 actually works]
+`CurveName` advertises ten curves, but the package is secp256k1-only in practice:
+
+- `NewEnclave()` hardcodes `K256Name`.
+- `GetBobSignFunc` and `GetBobRefreshFunc` ignore `k.Curve` and pass `curves.K256()`, while the Alice
+  side honours `k.Curve`. Setting `Curve` to anything else therefore puts the two parties on
+  different curves.
+- `GetECDSAPoint`, used by both `Verify` and `VerifyWithPubKey`, always uses `curves.K256()`.
+- The `default` branch of `Curve()` returns `curves.K256()` instead of erroring, so a typo in a
+  persisted `"curve"` field is silently coerced rather than rejected.
+
+Treat every constant other than `K256Name` as unimplemented.
+:::
+
+## Signing digests and double hashing
+
+`GetAliceSignFunc`/`GetBobSignFunc` pass `sha3.New256()` and the raw message into `dklsv1`, which
+hashes internally; `Verify` independently computes `sha3.New256(data)` and calls `ecdsa.Verify` on
+that digest. So `Sign(m)`/`Verify(m, sig)` are consistent, and the digest is SHA3-256 — not SHA-256.
+
+This matters for [UCAN](/identity/ucan): `ucan.MPCSigningMethod` hashes the JWT signing string with
+**SHA-256** and then calls `enclave.Sign(digest)`, which hashes that 32-byte digest again with
+SHA3-256. The composition is `SHA3-256(SHA-256(signingString))`. It verifies correctly because
+`Verify` does the same thing, but any external verifier must replicate both hashes.
+
+## `mpc/spec`
+
+`mpc/spec` is a **near-duplicate fork** of the UCAN types and MPC JWT plumbing that also lives in
+`github.com/sonr-io/crypto/ucan`. It redeclares `Token`, `Attenuation`, `Proof`, `Fact`, the
+`Capability` and `Resource` interfaces, `SimpleCapability`, `SimpleResource`, `KeyshareSource`, and
+`CreateSimpleAttenuation`, and adds:
+
+```go
+const (
+	UCANVersion    = "0.9.0"
+	UCANVersionKey = "ucv"
+	PrfKey         = "prf"
+	FctKey         = "fct"
+	AttKey         = "att"
+	CapKey         = "cap"
+)
+
+func NewSource(enclave mpc.Enclave) (KeyshareSource, error)
+func NewJWTSigningMethod(name string, enclave mpc.Enclave) *MPCSigningMethod
+func NewMPCSigningMethod(name string, enclave mpc.Enclave) *MPCSigningMethod // alias
+func RegisterMPCMethod(alg string)
+func (m *MPCSigningMethod) WithEnclave(enclave mpc.Enclave) *MPCSigningMethod
+```
+
+`spec` is the only place in the module that names `UCANVersion` as a constant — `ucan` writes the
+literal `"0.9.0"` inline into the `ucv` JWT header.
+
+:::danger[`mpc/spec`'s signing method violates the jwt/v5 contract]
+`golang-jwt/jwt/v5` requires `SigningMethod.Sign` to return the **raw** signature bytes (the library
+base64url-encodes them) and passes `Verify` the **already-decoded** bytes. `spec`'s implementation
+does the encoding itself in both directions:
+
+```go
+// Sign
+encoded := base64.RawURLEncoding.EncodeToString(sig)
+return []byte(encoded), nil
+
+// Verify
+sig, err := base64.RawURLEncoding.DecodeString(string(signature))
+```
+
+So a token minted through `spec` carries base64-of-base64 in its signature segment, and `Verify`
+base64-decodes bytes that jwt/v5 already decoded. `ucan.MPCSigningMethod` gets this right — it
+returns and consumes raw bytes.
+
+Worse, `spec`'s `init()` registers this implementation **globally**:
+
+```go
+func init() {
+	jwt.RegisterSigningMethod("MPC256", func() jwt.SigningMethod {
+		return &MPCSigningMethod{Name: "MPC256"} // enclave is nil
+	})
+}
+```
+
+Any program that imports `mpc/spec`, even transitively and even without calling anything in it,
+installs a global `"MPC256"` method whose factory produces a method with a nil enclave — so
+`jwt.Parse` on an MPC-signed token resolves to it and fails with
+`"MPC enclave not available for signature verification"`. `RegisterMPCMethod(alg)` does the same for
+an arbitrary algorithm name.
+:::
+
+**Use `github.com/sonr-io/crypto/ucan`, not `mpc/spec`.** `spec` is a maintenance hazard: two copies
+of the same type set that will drift, one of which is broken. It has no tests. Note that the
+duplication also means `ucan.Attenuation` and `spec.Attenuation` are distinct, non-interconvertible
+types.
+
+## Caveats
+
+:::warning[`randNonce` ignores its error]
+`mpc/codec.go`: `rand.Read(nonce)` is called without checking the return values. On a platform where
+`crypto/rand` fails, the nonce would be all zeros. In practice `crypto/rand.Read` on modern Go does
+not fail, but the omission is real.
+:::
+
+:::warning[`IsValid` is a nil check]
+`IsValid()` returns `k.ValShare != nil && k.UserShare != nil`. It does not check that the shares
+belong to the same key, that `PubBytes` matches them, or that `Curve` is set. Any `*EnclaveData` with
+two non-nil share pointers reports as "valid" and then fails at sign time.
+:::
+
+:::warning[`Result` can return `(nil, nil)`]
+`dklsv1`'s `Result(version)` returns `(nil, nil)` when the protocol has not finished — its
+completion check runs before its initialization check. `NewEnclave`, `ExecuteSigning` and
+`ExecuteRefresh` all call `Result` immediately after `CheckIteratedErrors` returns nil, so on the
+happy path this does not bite. But if you drive the iterators yourself, an `err == nil` from
+`Result` does **not** guarantee a non-nil `*protocol.Message`, and passing nil into
+`GetAliceOut`/`GetBobOut`/`GetAlicePublicPoint`/`GetBobPubPoint` or `dklsv1.DecodeSignature`
+nil-dereferences. Always nil-check the message as well as the error.
+:::
+
+:::warning[`RunProtocol`'s error pair is asymmetric]
+`RunProtocol(firstParty, secondParty)` returns `(aErr, bErr)` where `aErr` tracks the *second*
+argument and `bErr` the *first*. On an early real error it returns `(nil, bErr)` or `(aErr, nil)` —
+so always funnel the pair through `CheckIteratedErrors` rather than inspecting the two values
+positionally. Note also that `NewEnclave` calls `RunProtocol(userKs, valKs)`, i.e. the user side is
+`firstParty`.
+:::
+
+:::info[Marshal is plaintext JSON]
+`Marshal()` serializes both keyshares in the clear. If you persist that output, it is the complete
+signing key. Protect it accordingly — and given the fixed-nonce hazard above, prefer an independent
+AEAD over the built-in `Encrypt`.
+:::
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="UCAN Tokens" href="/identity/ucan" icon="ticket">
+    Signing capability tokens with an enclave, and what the verifier does and does not check.
+  </Card>
+  <Card title="Threshold ECDSA" href="/threshold/threshold-ecdsa" icon="users">
+    The `tecdsa/dklsv1` protocol underneath, for when you need to run the two parties apart.
+  </Card>
+  <Card title="did:key Identifiers" href="/identity/did-key" icon="id-card">
+    Turning `PubKeyBytes()` into a stable identifier.
+  </Card>
+  <Card title="AEAD" href="/symmetric/aead" icon="lock">
+    Encrypting a marshalled enclave properly, with a fresh nonce per operation.
+  </Card>
+</CardGroup>

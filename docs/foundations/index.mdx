@@ -1,0 +1,172 @@
+---
+title: Foundations
+description: The curve abstraction, the arithmetic helpers, and the protocol iterator — the three things almost every other package in this library is built on top of.
+sidebar:
+  order: 1
+  icon: layers
+---
+
+Nearly every package in this repository is generic over one type: `*curves.Curve`. BLS signatures, BBS+, Shamir sharing, Feldman/Pedersen VSS, Schnorr proofs, the accumulator, threshold ECDSA, and the DID key layer all take a curve value and do their work through two interfaces — `curves.Point` and `curves.Scalar`. If you understand those three things, the rest of the library reads as variations on a theme.
+
+This section covers the shared substrate:
+
+<CardGroup cols={3}>
+  <Card title="Curves" href="/foundations/curves" icon="circle-dot">
+    Every named curve constructor, the full `Point` / `Scalar` method sets, pairing curves, and the low-level `native` field arithmetic.
+  </Card>
+  <Card title="Arithmetic" href="/foundations/arithmetic" icon="sigma">
+    The `core` package: modular arithmetic over `big.Int`, hash-to-field, Fiat–Shamir, safe primes, and the HMAC commitment scheme.
+  </Card>
+  <Card title="Protocol" href="/foundations/protocol" icon="arrow-left-right">
+    The `Iterator` / `Message` crank pattern that drives every DKLs18-family interactive protocol.
+  </Card>
+</CardGroup>
+
+## The `Curve` value
+
+`curves.Curve` is a plain struct, not an interface. It is a *bundle of prototypes*:
+
+```go
+type Curve struct {
+	Scalar Scalar
+	Point  Point
+	Name   string
+}
+```
+
+`Scalar` and `Point` are not "the" scalar or "the" point — they are zero-valued exemplars you call constructor-shaped methods on. This is how the library gets generic behaviour without Go generics: `curve.Scalar.Random(rand.Reader)` dispatches to the K256 or Ed25519 or BLS12-381 implementation depending on which curve you were handed.
+
+Curve constructors are memoized behind `sync.Once`, so `curves.K256()` returns the same pointer on every call and is safe to call in a hot loop.
+
+<TypeTable
+  type={{
+    "curve.NewScalar()": {
+      type: "Scalar",
+      description: "A fresh scalar set to zero. Equivalent to curve.Scalar.Zero().",
+    },
+    "curve.NewGeneratorPoint()": {
+      type: "Point",
+      description: "The group generator G. Equivalent to curve.Point.Generator().",
+    },
+    "curve.NewIdentityPoint()": {
+      type: "Point",
+      description: "The point at infinity. Equivalent to curve.Point.Identity().",
+    },
+    "curve.ScalarBaseMult(sc)": {
+      type: "Point",
+      description: "Fixed-base multiplication sc·G. Use this instead of NewGeneratorPoint().Mul(sc).",
+    },
+    "curve.ToEllipticCurve()": {
+      type: "(elliptic.Curve, error)",
+      description: "Bridge to crypto/elliptic. Only K256 and P-256 succeed; every other curve returns an error.",
+    },
+  }}
+/>
+
+## Arithmetic on K256
+
+`Point` and `Scalar` methods are chainable and return new values — they never mutate the receiver, so you can hold onto intermediates freely.
+
+```go title="arith.go"
+package main
+
+import (
+	"crypto/rand"
+	"fmt"
+
+	"github.com/sonr-io/crypto/core/curves"
+)
+
+func main() {
+	curve := curves.K256()
+
+	// Two random field elements.
+	x := curve.Scalar.Random(rand.Reader)
+	y := curve.Scalar.Random(rand.Reader)
+
+	// Scalar field arithmetic: mod q, where q is the group order.
+	sum := x.Add(y)
+	xInv, err := x.Invert()
+	if err != nil {
+		panic(err) // only fails for zero
+	}
+	fmt.Println(x.Mul(xInv).IsOne()) // true
+
+	// Group arithmetic. Note the homomorphism:
+	//   (x + y)·G == x·G + y·G
+	P := curve.ScalarBaseMult(x)
+	Q := curve.NewGeneratorPoint().Mul(y)
+	fmt.Println(P.Add(Q).Equal(curve.ScalarBaseMult(sum))) // true
+
+	// Identity behaves as expected.
+	fmt.Println(P.Sub(P).Equal(curve.NewIdentityPoint())) // true
+
+	// Serialization round-trip: 33 bytes compressed for K256.
+	enc := P.ToAffineCompressed()
+	P2, err := curve.Point.FromAffineCompressed(enc)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(len(enc), P2.Equal(P), P.CurveName()) // 33 true secp256k1
+}
+```
+
+Two habits worth forming immediately:
+
+- **Deserialize through the curve's prototype**, i.e. `curve.Point.FromAffineCompressed(b)` and `curve.Scalar.SetBytes(b)`. These are the only entry points that know which concrete type to produce.
+- **Check the error on `Invert`, `Sqrt`, `SetBytes`, and `SetBigInt`.** The arithmetic methods (`Add`, `Mul`, `Neg`, `Double`) return no error and will happily produce garbage if you fed them a value from a different curve.
+
+:::warning[Cross-curve values do not panic]
+`Scalar.Cmp` returns `-2` when the two scalars belong to different fields — that is the only place the library tells you about a curve mismatch. `Add`, `Mul`, and friends have no error channel. Mixing a `ScalarK256` into a P-256 computation produces a silently wrong result, so keep a single `*curves.Curve` threaded through a computation rather than calling constructors ad hoc.
+:::
+
+## Two generations of API coexist
+
+This is the single most important orientation fact about the repository. There are **two** unrelated curve APIs in `core/curves`, and which one you get depends entirely on which package you called.
+
+<Tabs>
+  <Tab title="Modern (Point / Scalar)">
+Interface-based, generic over the curve, supports every curve in the catalog including pairing-friendly ones.
+
+```go
+curve := curves.K256()
+s := curve.Scalar.Random(rand.Reader) // curves.Scalar
+P := curve.ScalarBaseMult(s)          // curves.Point
+```
+
+Used by: `signatures/bbs`, `signatures/bls/bls_sig`, `signatures/schnorr/mina`, `signatures/schnorr/nem`, `sharing`, `dkg/frost`, `zkp/schnorr`, `accumulator`, `bulletproof`, `tecdsa/dklsv1`, `ted25519/frost`, `ot/*`.
+  </Tab>
+  <Tab title="Legacy (EcPoint / Field / Element)">
+Concrete structs over `crypto/elliptic` and `math/big`. No pairing support, no hash-to-curve, and scalars are raw `*big.Int` wrapped by an `EcScalar` strategy object.
+
+```go
+// EcPoint wraps an elliptic.Curve plus affine X, Y as *big.Int.
+P, err := curves.NewScalarBaseMult(btcec.S256(), k)
+
+// Field/Element is generic modular arithmetic over an explicit modulus.
+f := curves.NewField(order)
+e := f.NewElement(big.NewInt(3))
+e = e.Mul(f.NewElement(big.NewInt(4))) // 12 mod order
+```
+
+Used by: `sharing/v1`, `dkg/gennaro`, `dkg/gennaro2p`, `ted25519/ted25519` keygen, `paillier` (`psf.go`), and the ECDSA public-key conversion helpers in `keys` and `mpc`.
+  </Tab>
+</Tabs>
+
+The two worlds share nothing. There is no conversion helper between `curves.Point` and `*curves.EcPoint`, and no helper between `curves.Scalar` and `*curves.Element`. If you need to move a value across, you go through bytes or `big.Int` yourself and take responsibility for the encoding.
+
+:::danger[The legacy `Field` is not constant time]
+The package documentation for `core/curves` says so outright: *"Field implementation IS NOT constant time as it leverages math/big for big number operations."* This applies to `Field`, `Element`, `EcPoint`, and everything built on them — which includes `sharing/v1` and `dkg/gennaro`. Do not use those packages on secret-dependent inputs where timing is observable by an attacker. Prefer the modern `Point`/`Scalar` path for new code.
+:::
+
+## Where the pieces are used
+
+| Layer | Packages | What it needs from foundations |
+| --- | --- | --- |
+| [Signatures](/signatures) | `signatures/bls/bls_sig`, `signatures/bbs`, `signatures/schnorr/*` | `*curves.Curve`, or `*curves.PairingCurve` for BBS+ |
+| [Threshold](/threshold) | `sharing`, `dkg/*`, `tecdsa/dklsv1`, `ted25519/*`, `ot/*` | `*curves.Curve`, plus `core/protocol` for `tecdsa/dklsv1` |
+| [Zero-knowledge](/zero-knowledge) | `zkp/schnorr`, `accumulator`, `bulletproof` | `*curves.Curve`; the accumulator needs a `*PairingCurve` |
+| [Identity](/identity) | `keys`, `mpc`, `ucan`, `ecies`, `wasm` | `keys` and `mpc` use `curves`; `mpc` also uses `core/protocol`. `ucan`, `wasm`, and most of `ecies` do not touch the curve abstraction at all. |
+| [Symmetric](/symmetric) | `aead`, `daed`, `argon2`, `subtle`, `secure`, `salt`, `password` | nothing — these are pure `[]byte` APIs |
+
+Two more packages sit outside the curve abstraction entirely: `ecdsa` and `vrf` do not import `core/curves` at all, and `paillier` — like `core` itself — works directly over `math/big` integers with an explicit modulus. See [arithmetic](/foundations/arithmetic) for that world.

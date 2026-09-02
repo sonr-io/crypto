@@ -1,0 +1,119 @@
+---
+title: Threshold & MPC
+description: Splitting keys across parties so no single machine ever holds a signing key — secret sharing, distributed key generation, and threshold signing.
+sidebar:
+  order: 1
+  icon: users
+---
+
+Everything in this section exists to answer one question: **how do you sign without any single
+machine ever holding the private key?** The answer is built in four layers, and each layer is a
+separate package in this repository. Reading them bottom-up is the fastest way to make sense of the
+code.
+
+## The stack
+
+<Steps>
+<Step title="Oblivious transfer — ot/base/simplest, ot/extension/kos">
+The raw two-party primitive. A sender holds two messages, a receiver picks one, and neither learns
+anything about the other's choice. Threshold ECDSA needs it because ECDSA multiplies two secrets
+together, and OT is how two parties multiply shares without revealing them. You will almost never
+call this directly. See [Oblivious Transfer](/threshold/oblivious-transfer).
+</Step>
+<Step title="Secret sharing — sharing, sharing/v1">
+Shamir, Feldman, and Pedersen. Given a secret that *already exists*, split it into `n` shares so
+that any `t` reconstruct it. Purely local: one process does the splitting. See
+[Secret Sharing](/threshold/secret-sharing).
+</Step>
+<Step title="Distributed key generation — dkg/frost, dkg/gennaro, dkg/gennaro2p">
+Each party samples its own contribution and the parties run an interactive protocol. The resulting
+signing key is never assembled anywhere. See [Distributed Key Generation](/threshold/dkg).
+</Step>
+<Step title="Threshold signing — tecdsa/dklsv1, ted25519">
+Consume a DKG output and produce a signature that verifies under an ordinary ECDSA or Ed25519
+verifier. See [Threshold ECDSA](/threshold/threshold-ecdsa) and
+[Threshold Ed25519](/threshold/threshold-ed25519).
+</Step>
+</Steps>
+
+## Sharing a secret is not the same as DKG
+
+This is the distinction people get wrong, and getting it wrong voids the entire security argument.
+
+**Secret sharing with a dealer** (`sharing.Shamir`, `sharing.Feldman`, `sharing.Pedersen`,
+`tecdsa/dklsv1/dealer`) starts from a secret that exists in one process's memory. That process runs
+a polynomial, emits `n` shares, and hands them out. For the duration of `Split`, one machine knows
+the whole key. If that machine is compromised — or if it neglects to zero the secret, or if it is
+swapped to disk — the key is gone. Threshold reconstruction after the fact does not undo that.
+
+**Distributed key generation** (`dkg/frost`, `dkg/gennaro`, `dkg/gennaro2p`, and the DKG phase of
+`tecdsa/dklsv1`) never forms the key. Each participant `i` samples its own secret `s_i`, shares
+`s_i` with everyone, and the joint key is the sum of every contribution. Each party ends up with a
+share of `Σ s_i` and the public key `Σ s_i · G`, and no participant — not even a coalition below
+threshold — ever sees the key.
+
+:::warning[Dealer setup is a testing and migration tool]
+`tecdsa/dklsv1/dealer.GenerateAndDeal` constructs *both* parties' key shares inside a single
+process. Its own package doc says so: "Running actual DKG is ALWAYS recommended over a trusted
+dealer." Use it for tests and for migrating a key you already hold; never for fresh key creation in
+production.
+:::
+
+## Protocol comparison
+
+| Package | Threshold model | Curves | Rounds | Notes |
+| --- | --- | --- | --- | --- |
+| `sharing` (Shamir/Feldman/Pedersen) | t-of-n, `2 ≤ t ≤ n ≤ 255` | any `curves.Curve` | none (local) | Trusted dealer |
+| `sharing/v1` | t-of-n | `elliptic.Curve` / `curves.Field` | none (local) | Legacy; `[]byte` secrets |
+| `dkg/frost` | t-of-n | any `curves.Curve` | 2 | Feldman VSS + Schnorr PoK |
+| `dkg/gennaro` | t-of-n, ids must be exactly `1..n` | k256 and other `elliptic.Curve` | 4 | Pedersen then Feldman |
+| `dkg/gennaro2p` | 2-of-2 | `elliptic.Curve` | 2 + `Finalize` | Façade over `dkg/gennaro` |
+| `tecdsa/dklsv1` (DKG) | 2-of-2 only | K256, P256 | 10 interleaved half-rounds | DKLs18 |
+| `tecdsa/dklsv1` (sign) | 2-of-2 only | K256, P256 | 4 interleaved half-rounds | Bob receives the signature |
+| `tecdsa/dklsv1` (refresh) | 2-of-2 only | K256, P256 | 7 interleaved half-rounds | Public key unchanged |
+| `ted25519/ted25519` | t-of-n | Ed25519 only | 1 round + aggregation | Output is a plain Ed25519 signature |
+| `ted25519/frost` | t-of-n | any `curves.Curve` | 3 | Schnorr, needs a `dkg/frost` result |
+| `ot/base/simplest` | 2-party | any `curves.Curve` | 8 interleaved half-rounds | Internal |
+| `ot/extension/kos` | 2-party | K256, P256 (tested) | 3 | Internal |
+
+:::note[Curve support in the table means "exercised in this repository's tests"]
+Most of these types are generic over the [curve abstraction](/foundations/curves). The curve column
+records what the tests actually run, not a claim about what is safe. `tecdsa/dklsv1`, for instance,
+is only ever tested on `curves.K256()` and `curves.P256()`.
+:::
+
+## Do not drive rounds by hand
+
+For 2-of-2 ECDSA — which is what a Sonr wallet uses — the round-level API is not the intended entry
+point. Two layers sit above it:
+
+1. `tecdsa/dklsv1`'s `protocol.Iterator` wrappers (`NewAliceDkg`, `NewBobSign`, …) reduce every
+   protocol to a `Next(msg)` loop over opaque `*protocol.Message` values you can put on a wire.
+2. The `mpc` package wraps *that* into an enclave with key import/export, signing, and
+   serialization. Application code should start there. See [MPC Enclave](/identity/mpc-enclave).
+
+Reach for the numbered `Round1..Round10` methods only when you are writing your own transport, or
+auditing.
+
+## Where to next
+
+<CardGroup cols={2}>
+<Card title="Secret Sharing" href="/threshold/secret-sharing" icon="split">
+Shamir, Feldman, and Pedersen VSS: which one, and what each fails to protect against.
+</Card>
+<Card title="Distributed Key Generation" href="/threshold/dkg" icon="git-branch">
+FROST, Gennaro, and the 2-party Gennaro façade, with exact round tables.
+</Card>
+<Card title="Threshold ECDSA" href="/threshold/threshold-ecdsa" icon="pen-tool">
+DKLs18 2-of-2 ECDSA: the iterator API, serialization, refresh, and the dealer shortcut.
+</Card>
+<Card title="Threshold Ed25519" href="/threshold/threshold-ed25519" icon="key-round">
+t-of-n Ed25519 that verifies under a stock verifier, plus FROST Schnorr.
+</Card>
+<Card title="Oblivious Transfer" href="/threshold/oblivious-transfer" icon="shuffle">
+The layer under tECDSA. Read this to audit, not to call.
+</Card>
+<Card title="MPC Enclave" href="/identity/mpc-enclave" icon="lock">
+The batteries-included wrapper most application code should use.
+</Card>
+</CardGroup>

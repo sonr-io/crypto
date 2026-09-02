@@ -1,0 +1,332 @@
+---
+title: did:key Identifiers
+description: Encode a public key as a self-describing did:key string, parse it back, and derive verification material — plus a frank assessment of the keys/parsers package.
+sidebar:
+  order: 2
+  icon: id-card
+---
+
+`github.com/sonr-io/crypto/keys` turns a public key into a stable, self-describing string and back
+again. A `did:key` identifier needs no registry and no network lookup: the key material *is* the
+identifier, so resolving one is a pure decode. The package wraps libp2p's
+`github.com/libp2p/go-libp2p/core/crypto.PubKey` interface, which gives it RSA, Ed25519, and
+secp256k1 support for free, and adds a secp256k1-specific path for public keys that arrive as raw
+bytes from an [MPC enclave](/identity/mpc-enclave).
+
+**Reach for this when** you need a canonical identifier for a key you already hold — a UCAN issuer,
+a log line, a database column, a delegation audience.
+
+**Do not reach for this when** you need a DID with mutable state (rotation, service endpoints,
+multiple verification methods). `did:key` is immutable by construction: change the key, change the
+identifier. The `DIDMethod` enum in this package names other methods, but only `did:key` is
+implemented here.
+
+## Encoding
+
+`DID.String()` builds the identifier in three steps:
+
+1. `id.Raw()` — the raw public key bytes from libp2p (33 or 65 bytes for secp256k1, 32 for Ed25519,
+   DER PKIX for RSA).
+2. An unsigned-varint multicodec prefix identifying the key type is prepended.
+3. The whole buffer is multibase-encoded with base58btc, which yields the leading `z`.
+
+So every identifier this package produces looks like `did:key:z…`. `Parse` reverses exactly those
+steps and rejects any multibase encoding other than base58btc.
+
+| Key type | Constant | Multicodec | Accepted raw lengths |
+| --- | --- | --- | --- |
+| RSA (`rsa-x509-pub`) | `MulticodecKindRSAPubKey` | `0x1205` | DER, parsed via `x509.ParsePKIXPublicKey` |
+| Ed25519 (`ed25519-pub`) | `MulticodecKindEd25519PubKey` | `0xed` | 32 |
+| secp256k1 (`secp256k1-pub`) | `MulticodecKindSecp256k1PubKey` | `0xe7` | 33 (compressed) or 65 (uncompressed) |
+
+`KeyPrefix` is the string constant `"did:key"`. `GetMulticodecType(keyType int)` maps an
+`int(crypto.RSA)` / `int(crypto.Ed25519)` / `int(crypto.Secp256k1)` to the values above and errors on
+anything else.
+
+:::note
+Canonical `did:key` for secp256k1 uses the **compressed** 33-byte point. `Parse` and `NewFromMPCPubKey`
+also accept the 65-byte uncompressed form, which means two distinct `did:key` strings can name the
+same key. If you compare identifiers as strings, normalise through `CompressedPubKey()` first.
+:::
+
+## Constructors
+
+<TypeTable
+  type={{
+    "NewDID": {
+      type: "func(pub crypto.PubKey) (DID, error)",
+      description: "Wraps a libp2p public key. Accepts Ed25519, RSA, Secp256k1; errors on any other key type."
+    },
+    "NewFromPubKey": {
+      type: "func(pub PubKey) DID",
+      description: "Wraps this package's own PubKey (a curves.Point-backed secp256k1 key). Infallible."
+    },
+    "NewFromMPCPubKey": {
+      type: "func(pubKeyBytes []byte) (DID, error)",
+      description: "Unmarshals 33- or 65-byte secp256k1 public key bytes straight from an MPC enclave. Errors on any other length."
+    },
+    "Parse": {
+      type: "func(keystr string) (DID, error)",
+      description: "Decodes a did:key string. Requires the did:key prefix, base58btc multibase, and a recognised multicodec."
+    },
+    "ValidateFormat": {
+      type: "func(didString string) error",
+      description: "Prefix check followed by a full Parse. Use when you only need a yes/no on a string."
+    },
+  }}
+/>
+
+## The `DID` type
+
+`DID` embeds `crypto.PubKey`, so every libp2p method (`Raw`, `Type`, `Equals`, `Verify`, `Bytes`) is
+promoted onto it. On top of that:
+
+<TypeTable
+  type={{
+    "String": {
+      type: "func() string",
+      description: "The did:key identifier. Returns \"\" — not an error — if Raw() or multibase encoding fails."
+    },
+    "PublicKey": {
+      type: "func() crypto.PubKey",
+      description: "The embedded libp2p public key."
+    },
+    "MulticodecType": {
+      type: "func() uint64",
+      description: "The multicodec for this key type. PANICS on an unrecognised key type rather than returning an error."
+    },
+    "CompressedPubKey": {
+      type: "func() ([]byte, error)",
+      description: "33-byte compressed point for secp256k1 (converting from 65 bytes if needed); raw bytes for every other key type."
+    },
+    "VerifyKey": {
+      type: "func() (any, error)",
+      description: "*rsa.PublicKey for RSA, ed25519.PublicKey for Ed25519, and the raw []byte for secp256k1."
+    },
+    "Address": {
+      type: "func() (string, error)",
+      description: "A \"sonr1\"-prefixed string. See the caveat below — it is not a hash and not bech32."
+    },
+  }}
+/>
+
+:::warning[`MulticodecType` panics]
+`String()` calls `MulticodecType()` unconditionally. A `DID` holding a key type outside
+`{RSA, Ed25519, secp256k1}` will panic with `"unexpected crypto type"` when stringified. `NewDID`
+guards against this, but a `DID` constructed as a struct literal (`keys.DID{PubKey: k}`) does not.
+:::
+
+## Round trip
+
+Grounded in `TestDIDStringFormat` and `TestMPCIntegration` in `keys/didkey_test.go`:
+
+```go didkey_roundtrip.go
+package main
+
+import (
+	"crypto/rand"
+	"fmt"
+
+	p2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/sonr-io/crypto/keys"
+)
+
+func main() {
+	priv, _, err := p2pcrypto.GenerateSecp256k1Key(rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+
+	did, err := keys.NewDID(priv.GetPublic())
+	if err != nil {
+		panic(err)
+	}
+
+	s := did.String() // "did:key:z..."
+	fmt.Println(s)
+
+	parsed, err := keys.Parse(s)
+	if err != nil {
+		panic(err)
+	}
+
+	// The encoding is canonical for a given input: re-stringifying is identical.
+	fmt.Println("stable:", parsed.String() == s)
+	fmt.Println("same type:", parsed.Type() == did.Type())
+
+	// Cheap validity check on an untrusted string.
+	fmt.Println("valid:", keys.ValidateFormat(s) == nil)
+
+	compressed, err := parsed.CompressedPubKey()
+	fmt.Println("compressed len:", len(compressed), err) // 33
+}
+```
+
+For a key that arrives from an enclave rather than a libp2p keypair, swap the constructor:
+
+```go
+did, err := keys.NewFromMPCPubKey(enclave.PubKeyBytes())
+```
+
+## `DIDMethod`
+
+A plain string enum, verbatim from `keys/methods.go`. It carries no behaviour beyond `String()`, and
+nothing else in the package consumes it — it exists for callers that need to tag which method a DID
+string belongs to.
+
+```go
+const (
+	DIDMethodKey      DIDMethod = "key"
+	DIDMethodSonr     DIDMethod = "sonr"
+	DIDMehthodBitcoin DIDMethod = "btcr"
+	DIDMethodEthereum DIDMethod = "ethr"
+	DIDMethodCbor     DIDMethod = "cbor"
+	DIDMethodCID      DIDMethod = "cid"
+	DIDMethodIPFS     DIDMethod = "ipfs"
+)
+```
+
+:::note
+`DIDMehthodBitcoin` is misspelled in the source. It is exported, so fixing it would be a breaking
+change; use it as written.
+:::
+
+## The `PubKey` interface
+
+Separate from libp2p's type, `keys.PubKey` adapts a [`curves.Point`](/foundations/curves) into
+something `DID` can embed. `NewPubKey(pk curves.Point) PubKey` is the only constructor.
+
+<TypeTable
+  type={{
+    "Bytes": { type: "func() []byte", description: "point.ToAffineCompressed() — 33 bytes on secp256k1." },
+    "Raw": { type: "func() ([]byte, error)", description: "Identical to Bytes; the error is always nil." },
+    "Hex": { type: "func() string", description: "Hex of the compressed point." },
+    "Type": { type: "func() p2ppb.KeyType", description: "Hardcoded to KeyType_Secp256k1 regardless of the point's actual curve." },
+    "Equals": { type: "func(b p2pcrypto.Key) bool", description: "Compares Raw() bytes." },
+    "Verify": { type: "func(msg, sig []byte) (bool, error)", description: "ECDSA verify over a SHA3-256 digest. Signature layout below." },
+  }}
+/>
+
+### The 66-byte signature layout
+
+`PubKey.Verify` does **not** accept a standard 64-byte `r || s` signature. Reading
+`keys/pubkey.go` and `keys/utils.go`, it:
+
+1. Requires the signature to be **exactly 66 bytes**, rejecting anything else with
+   `"malformed signature: not the correct size"`.
+2. Parses it as `V || R || S`, where `V` is a single recovery-id byte at offset 0, `R` is
+   `sig[1:33]`, and `S` is `sig[33:66]`.
+3. Hashes the message with **SHA3-256** (not SHA-256) and calls `ecdsa.Verify` on that digest,
+   ignoring `V` entirely.
+4. Reconstructs the ECDSA public key by slicing the compressed point as `x = bytes[1:33]`,
+   `y = bytes[33:]` on `curves.K256()`.
+
+:::danger[`keys.PubKey.Verify` cannot verify `mpc.Enclave.Sign` output]
+`mpc.SerializeSignature` produces a fixed **64-byte** `r || s` buffer, and `keys.deserializeSignature`
+rejects anything that is not 66 bytes. So `keys.NewPubKey(point).Verify(msg, enclaveSig)` always
+returns `("malformed signature: not the correct size")`. Verify enclave signatures with
+`enclave.Verify(data, sig)` or `mpc.VerifyWithPubKey(enclave.PubKeyBytes(), data, sig)` instead — both
+use the 64-byte layout. See [MPC Enclave](/identity/mpc-enclave).
+
+Step 4 above is also wrong for a genuinely compressed point: on a 33-byte compressed encoding,
+`bytes[33:]` is empty, so `y` decodes as zero. `Verify` therefore only works if `Bytes()` happens to
+return 65 bytes — which it never does, since `ToAffineCompressed()` returns 33. Treat
+`keys.PubKey.Verify` as non-functional.
+:::
+
+## `Address()` does not do what its comment says
+
+The doc comment promises "a blockchain-compatible address" and an inline comment claims
+"first 20 bytes of Keccak-256 hash (Ethereum-style)". The code does neither:
+
+```go
+// keys/didkey.go, secp256k1 branch, verbatim:
+return fmt.Sprintf("sonr1%x", rawPubBytes[:8]), nil
+```
+
+:::danger[`Address()` is a truncated hex prefix, not an address]
+For all three key types the function returns `"sonr1"` followed by the hex of the **first 8 bytes of
+the raw public key**. There is no hash, no Keccak, and no bech32 encoding despite the bech32-looking
+`sonr1` prefix. Consequences:
+
+- It is **not one-way**: the output leaks 8 bytes of the public key verbatim.
+- It has **no checksum**, so a typo is undetectable.
+- 64 bits of collision space, birthday-bounded at roughly 2<sup>32</sup> keys.
+- For secp256k1 it compresses a 65-byte key first, so the compressed and uncompressed forms of the
+  same key produce the same address — but an Ed25519 and a secp256k1 key sharing a first-8-byte
+  prefix also collide.
+
+`ucan` uses this value as the address in `MPCTokenBuilder.GetAddress()` and `KeyshareSource.Address()`.
+Do not treat it as a chain address on any real network.
+:::
+
+## Avoid `keys/parsers`
+
+`keys/parsers` looks like a set of per-chain address parsers. It is not. Verified by reading every
+file in the directory:
+
+| File | Lines | Contents |
+| --- | --- | --- |
+| `btc_parser.go` | 1 | `package parsers` |
+| `eth_parser.go` | 1 | `package parsers` |
+| `fil_parser.go` | 1 | `package parsers` |
+| `sol_parser.go` | 1 | `package parsers` |
+| `ton_parser.go` | 1 | `package parsers` |
+| `cosmos_parser.go` | 12 | A `CosmosPrefix` string type and six bech32 HRP constants. No functions. |
+| `key_parser.go` | 157 | A near-verbatim copy of `keys/didkey.go`, exporting `DIDKey` instead of `DID`. |
+
+:::danger[`keys/parsers` duplicates `keys` with an incompatible multicodec]
+`keys/parsers` redeclares the multicodec constants, and one of them disagrees:
+
+```go
+// keys/didkey.go
+MulticodecKindSecp256k1PubKey = 0xe7   // secp256k1-pub, the registered value
+
+// keys/parsers/key_parser.go
+MulticodecKindSecp256k1PubKey = 0x1206 // not secp256k1-pub
+```
+
+A secp256k1 `did:key` produced by `parsers.DIDKey.String()` carries a different varint prefix, so
+`keys.Parse` rejects it with `"unrecognized key type multicodec prefix"`, and vice versa. The two
+packages produce **mutually unparseable identifiers for the same key**. `keys` uses the registered
+multicodec table value; `parsers` does not.
+
+The five empty files mean the package name promises chain address parsing that does not exist:
+`parsers` exports only `KeyPrefix`, the multicodec constants, `CosmosPrefix` and its six constants,
+`DIDKey` with `NewKeyDID`/`MulticodecType`/`String`/`VerifyKey`, and `Parse`.
+
+**Use `github.com/sonr-io/crypto/keys`. Do not import `keys/parsers`.**
+:::
+
+## Caveats
+
+:::warning[Silent failure in `String()`]
+`String()` returns the empty string on any internal error rather than reporting it. An empty
+identifier where you expected `did:key:z…` means `Raw()` or multibase encoding failed; check the key
+with `NewDID` first, or call `ValidateFormat` on the result.
+:::
+
+:::warning[`Parse` error message reads the wrong byte]
+The fallthrough error is `fmt.Errorf("unrecognized key type multicodec prefix: %x", data[0])`, but
+the multicodec was decoded as a multi-byte varint into `keyType`. For prefixes above `0x7f` — RSA's
+`0x1205`, for example — the reported byte is the first varint byte, not the codec. The error is
+cosmetic; the rejection itself is correct.
+:::
+
+:::info[What is actually covered by tests]
+`keys/didkey_test.go` exercises `NewFromMPCPubKey` length validation, the `0xe7` constant,
+`Address`, `CompressedPubKey`, `ValidateFormat`, `GetMulticodecType`, and the string/parse round trip.
+There is **no** test for `NewFromPubKey`, `NewPubKey`, or `PubKey.Verify` — which is consistent with
+the signature-layout defect above going unnoticed.
+:::
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="MPC Enclave" href="/identity/mpc-enclave" icon="shield">
+    Where `NewFromMPCPubKey`'s input comes from, and how to sign with the key behind the identifier.
+  </Card>
+  <Card title="UCAN Tokens" href="/identity/ucan" icon="ticket">
+    Using a `did:key` as a token issuer and delegation audience.
+  </Card>
+</CardGroup>

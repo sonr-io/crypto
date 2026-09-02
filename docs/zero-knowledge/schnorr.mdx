@@ -1,0 +1,275 @@
+---
+title: Schnorr proofs
+description: Non-interactive proof of knowledge of a discrete log over any curve in core/curves, with an optional commit-then-reveal variant used by this module's DKG and OT protocols.
+sidebar:
+  label: Schnorr
+  order: 2
+  icon: badge-check
+---
+
+`zkp/schnorr` implements a single, small, well-scoped thing: a Fiat-Shamir-compiled proof
+that you know the scalar behind a curve point. Its package doc names its source — Doerner et
+al., [eprint 2018/499](https://eprint.iacr.org/2018/499.pdf) — and implements Functionality 6
+(the plain proof) and Functionality 7 (the committed variant) from that paper.
+
+This is the most heavily used primitive in the repository. It is the proof that Alice and Bob
+exchange in DKLs threshold-ECDSA key generation, and the proof the sender uses to convince the
+receiver it knows its own base-OT secret key.
+
+## What is actually proved
+
+Given a base point `B` and a witness scalar `x`, the prover publishes the statement
+`X = x·B` together with a challenge/response pair `(C, S)`. Writing `k` for a fresh random
+nonce and `sid` for `uniqueSessionId`:
+
+$$
+C = H(\text{sid} \parallel B \parallel X \parallel k \cdot B), \qquad
+S = C \cdot x + k
+$$
+
+The verifier never sees `k`. It recovers the nonce point from the response and re-derives the
+challenge:
+
+$$
+C' = H(\text{sid} \parallel B \parallel X \parallel (S \cdot B - C \cdot X))
+$$
+
+and accepts only if `C'` equals `C`, compared with `crypto/subtle.ConstantTimeCompare`. The
+hash is SHA3-256; the digest is widened to a scalar with `Scalar.SetBytesWide`. A verifier
+learns that *some* `x` satisfying `X = x·B` is known to the prover, and learns nothing else
+about it.
+
+## When to use it
+
+Reach for this when a protocol participant must demonstrate honest generation of a public
+value derived from a secret it keeps — a key share, an OT secret key, a nonce commitment.
+It is the standard defence against a party contributing a public point whose discrete log it
+does not know.
+
+Do **not** reach for it as a signature scheme. The statement is not bound to a message, only
+to `uniqueSessionId` and the base point, so it authenticates nothing about payload data. For
+signing use [ECDSA](/signatures/ecdsa) or [BLS](/signatures/bls). Do not reach for it to prove
+anything other than discrete-log knowledge: there is no range, no set membership, and no
+relation between multiple statements here.
+
+## API
+
+<TypeTable
+  type={{
+    "NewProver": {
+      type: "func(curve *curves.Curve, basepoint curves.Point, uniqueSessionId []byte) *Prover",
+      required: true,
+      description: "Binds a curve, a base point, and a domain separator. Never returns an error.",
+    },
+    "Prover.Prove": {
+      type: "func(x curves.Scalar) (*Proof, error)",
+      required: true,
+      description: "Computes Statement = x·basepoint and the (c, s) pair. One curve multiplication for the statement plus one for the nonce point.",
+    },
+    "Prover.ProveCommit": {
+      type: "func(x curves.Scalar) (*Proof, Commitment, error)",
+      description: "Same proof, plus SHA3-256(c || s) as a commitment to open later.",
+    },
+    "Verify": {
+      type: "func(proof *Proof, curve *curves.Curve, basepoint curves.Point, uniqueSessionId []byte) error",
+      required: true,
+      description: "Returns nil on success, an error on failure. There is no boolean return.",
+    },
+    "DecommitVerify": {
+      type: "func(proof *Proof, commitment Commitment, curve *curves.Curve, basepoint curves.Point, uniqueSessionId []byte) error",
+      description: "Checks the proof opens the commitment, then verifies the proof.",
+    },
+  }}
+/>
+
+### Types
+
+`Commitment` is a plain type alias for `[]byte` — no wrapper, no methods.
+
+<TypeTable
+  type={{
+    Statement: {
+      type: "curves.Point",
+      required: true,
+      description: "The point whose discrete log is proved: x · basepoint. Constructed by Prove, not supplied by the caller.",
+    },
+    C: {
+      type: "curves.Scalar",
+      required: true,
+      description: "The Fiat-Shamir challenge scalar.",
+    },
+    S: {
+      type: "curves.Scalar",
+      required: true,
+      description: "The response scalar, c·x + k.",
+    },
+  }}
+/>
+
+All three `Proof` fields are exported, so the struct serializes directly. `tecdsa/dklsv1`
+transmits it with `encoding/gob` in `dkgserializers.go`.
+
+### The `basepoint == nil` shorthand
+
+Both `NewProver` and `Verify` accept `basepoint == nil` and substitute
+`curve.NewGeneratorPoint()`. Passing `nil` on one side and an explicit generator on the other
+is safe because it resolves to the same point. Passing a *different* point on the two sides is
+not: the base point is hashed into the challenge, so verification simply fails.
+
+Proving with respect to a non-generator base point is a real use case, not a curiosity.
+`tecdsa/dklsv1/sign` proves knowledge of Alice's nonce `kA` with respect to Bob's point `DB`,
+so that the statement is exactly `R = kA · DB`:
+
+```go
+rSchnorrProver := schnorr.NewProver(alice.curve, round2Output.DB, uniqueSessionId[:])
+round3Output.RSchnorrProof, err = rSchnorrProver.Prove(kA)
+```
+
+## Basic proof and verification
+
+Grounded in `zkp/schnorr/schnorr_test.go`, which runs this exact flow over K256, P256,
+PALLAS, BLS12-377 G1/G2, BLS12-381 G1/G2, and ED25519.
+
+```go proof.go
+package main
+
+import (
+	"crypto/rand"
+	"fmt"
+
+	"golang.org/x/crypto/sha3"
+
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/zkp/schnorr"
+)
+
+func main() {
+	curve := curves.K256()
+
+	// Both sides must agree on these bytes, byte for byte.
+	uniqueSessionId := sha3.New256().Sum([]byte("my-protocol/dkg/round-3"))
+
+	// Prover side: nil basepoint means the curve's default generator.
+	prover := schnorr.NewProver(curve, nil, uniqueSessionId)
+	secret := curve.Scalar.Random(rand.Reader)
+
+	proof, err := prover.Prove(secret)
+	if err != nil {
+		panic(err)
+	}
+
+	// proof.Statement == secret * G, and is what the verifier will treat
+	// as the public key.
+	fmt.Println("statement:", proof.Statement.ToAffineCompressed())
+
+	// Verifier side: same curve, same basepoint convention, same session id.
+	if err := schnorr.Verify(proof, curve, nil, uniqueSessionId); err != nil {
+		panic(err) // "schnorr verification failed"
+	}
+}
+```
+
+## The committed variant
+
+`ProveCommit` returns the proof *and* `SHA3-256(C.Bytes() || S.Bytes())`. A protocol sends
+the commitment first, waits for the counterparty to commit to its own contribution, and only
+then reveals the proof, which `DecommitVerify` checks against the earlier commitment before
+verifying it.
+
+The reason is ordering, not secrecy. Without it, whichever party speaks second can choose its
+key share *after* seeing the first party's public point, and bias the combined public key.
+Committing first removes that freedom.
+
+This is precisely how DKLs 2-of-2 DKG is wired in `tecdsa/dklsv1/dkg`:
+
+<Steps>
+  <Step title="Alice commits">
+    Alice builds a prover over her session id and calls `ProveCommit(alice.secretKeyShare)`.
+    She keeps the `*schnorr.Proof` in memory and sends only the `schnorr.Commitment`.
+  </Step>
+  <Step title="Bob proves in the clear">
+    Bob stores `round2Output.Commitment`, builds his own prover, and calls
+    `Prove(bob.secretKeyShare)`, sending the full proof.
+  </Step>
+  <Step title="Alice verifies and reveals">
+    `Round4VerifyAndReveal` calls `schnorr.Verify` on Bob's proof, then returns Alice's
+    previously withheld proof.
+  </Step>
+  <Step title="Bob decommits and verifies">
+    `Round5DecommitmentAndStartOt` calls
+    `schnorr.DecommitVerify(proof, bob.aliceCommitment, bob.curve, nil, bob.aliceSalt[:])`.
+    Only after this does Bob derive `bob.publicKey = proof.Statement.Mul(bob.secretKeyShare)`.
+  </Step>
+</Steps>
+
+```go committed.go
+prover := schnorr.NewProver(curve, nil, uniqueSessionId)
+
+proof, commitment, err := prover.ProveCommit(secret)
+if err != nil {
+	panic(err)
+}
+
+// ... round trip: send `commitment`, receive the peer's contribution ...
+// ... then send `proof` ...
+
+if err := schnorr.DecommitVerify(proof, commitment, curve, nil, uniqueSessionId); err != nil {
+	panic(err) // "initial hash decommitment failed" or "schnorr verification failed"
+}
+```
+
+## Caveats
+
+:::warning[uniqueSessionId is load-bearing]
+`uniqueSessionId` is the first thing hashed into the challenge. It is the domain separator
+that binds a proof to one execution of one protocol, and prover and verifier **must** pass
+byte-identical values or verification fails with a generic
+`"schnorr verification failed"` — you get no hint that the session ids diverged.
+
+Two failure modes matter:
+
+- **Reuse across contexts.** A proof made under session id `S` verifies under session id `S`
+  anywhere. If you use a constant, a proof captured from one sub-protocol replays into
+  another. Derive it from a live transcript. The repo's own callers do: `dklsv1` and
+  `simplest` build it from a hash of protocol-specific salts and seeds.
+- **Attacker-chosen ids.** If a remote party picks the session id you verify under, it picks
+  the domain the proof is bound to. Derive it from data both sides contributed, never from
+  one side's unilateral input.
+:::
+
+:::note[The commitment covers only (C, S)]
+`ProveCommit` hashes `C.Bytes()` and `S.Bytes()` — it does **not** hash `Statement`. The
+statement is still bound, but indirectly: `Verify` recomputes the challenge from the statement,
+so an opened proof only verifies against the statement it was made for. Do not, however,
+treat the `Commitment` as a standalone commitment to the public point; it is not one, and it
+carries no information about which statement will be revealed.
+:::
+
+:::warning[No message binding]
+The challenge covers `uniqueSessionId`, the base point, the statement, and the nonce point.
+It does not cover any application message. This is a proof of knowledge, not a signature. If
+you need to bind a payload, fold that payload into `uniqueSessionId` before constructing the
+prover.
+:::
+
+:::info[Error shape]
+`Verify` and `DecommitVerify` return `error`, not `(bool, error)`. A `nil` return is the only
+success signal. Do not ignore the error value; there is no other output to inspect.
+:::
+
+The `Prover` struct itself is stateless with respect to the witness — it holds only the curve,
+base point, and session id, so a single prover can produce proofs for many different witnesses
+under the same domain. Each `Prove` call draws a fresh nonce `k` from `crypto/rand`.
+
+## Where this is used in the module
+
+<CardGroup cols={2}>
+  <Card title="Threshold ECDSA" href="/threshold/threshold-ecdsa" icon="users">
+    `tecdsa/dklsv1` uses the committed variant in DKG rounds 3–5, and the plain variant with a
+    custom base point during signing.
+  </Card>
+  <Card title="Oblivious transfer" href="/threshold/oblivious-transfer" icon="shuffle">
+    `ot/base/simplest` has the sender prove knowledge of its base-OT secret key in round 1,
+    which the receiver verifies before any transfer.
+  </Card>
+</CardGroup>

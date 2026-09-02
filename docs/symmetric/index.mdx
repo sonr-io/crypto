@@ -1,0 +1,127 @@
+---
+title: Symmetric & Secrets
+description: Bulk encryption, password-based key derivation, and the secret-hygiene helpers — how to pick between them and how they compose.
+sidebar:
+  order: 1
+  icon: lock
+---
+
+This is the "boring" half of the library, and the half you will actually touch on every request path. Nothing here is generic over the elliptic-curve abstraction: every package on these pages takes and returns `[]byte`. That makes the layer easy to reason about and easy to misuse, so each page is explicit about the exact key sizes, ciphertext layouts, and constants involved.
+
+The packages split into three jobs:
+
+- **Encrypt bytes.** [`aead`](/symmetric/aead) is randomized AES-256-GCM — the default choice. [`daed`](/symmetric/deterministic-aead) is AES-SIV, a deterministic AEAD for the narrow cases where you need the same plaintext to produce the same ciphertext.
+- **Turn a secret into a key.** [`argon2`](/symmetric/key-derivation) stretches a human password into key material and produces PHC-encoded password hashes. [`subtle`](/symmetric/key-derivation#subtle-hkdf-and-x25519) is the HKDF + X25519 layer for turning an already-high-entropy secret (a shared secret, a master key) into per-purpose subkeys.
+- **Handle the secret carefully.** [`secure`](/symmetric/secrets), [`salt`](/symmetric/secrets#salt), [`password`](/symmetric/secrets#password), and [`subtle/random`](/symmetric/secrets#subtle-random) are small hygiene helpers: zeroization, constant-time comparison, salt generation and storage, password policy checks, and raw randomness.
+
+## Pick one
+
+| Your goal | Package | Entry point |
+| --- | --- | --- |
+| Encrypt a payload, blob, or message | `aead` | `NewAESGCM(key)` → `Encrypt(pt, aad)` |
+| Encrypt a lookup key or identifier you must still be able to search by | `daed` | `NewAESSIV(key)` → `EncryptDeterministically` |
+| Wrap key material with no nonce to manage | `daed` | `NewAESSIV(key)` |
+| Derive an encryption key from a user's password | `argon2` | `New(DefaultConfig()).DeriveKey(pw, salt)` |
+| Store a verifiable password hash | `argon2` | `HashPassword` / `VerifyPassword` |
+| Split one master secret into several purpose-bound subkeys | `subtle` | `ComputeHKDF("SHA256", key, salt, info, 32)` |
+| Agree on a key with a remote peer | `subtle` | X25519 trio → `ComputeHKDF` |
+| Generate a salt | `salt` or `argon2` | `salt.GenerateDefault()` / `kdf.GenerateSalt()` |
+| Generate raw random bytes | `secure` | `SecureRandom(buf)` |
+| Compare two secrets without leaking timing | `argon2` | `CompareHashes(a, b)` |
+| Zero a key out of memory after use | `secure` | `Zeroize(key)` |
+| Enforce a password policy at signup | `password` | `NewValidator(nil).Validate(pw)` |
+
+## How they compose
+
+The realistic pipeline is: get entropy, stretch or expand it into a 32-byte key, encrypt with that key, then zero the key.
+
+```go
+package vault
+
+import (
+	"github.com/sonr-io/crypto/aead"
+	"github.com/sonr-io/crypto/argon2"
+	"github.com/sonr-io/crypto/secure"
+)
+
+func sealWithPassword(password, plaintext, aad []byte) (key, salt, ct []byte, err error) {
+	kdf := argon2.New(argon2.DefaultConfig()) // Argon2id, 64 MiB, t=1, p=4
+
+	salt, err = kdf.GenerateSalt() // 32 bytes
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	key = kdf.DeriveKey(password, salt) // 32 bytes == aead.KeySize
+	defer secure.Zeroize(key)
+
+	cipher, err := aead.NewAESGCM(key)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	ct, err = cipher.Encrypt(plaintext, aad) // nonce || ciphertext || tag
+	return key, salt, ct, err
+}
+```
+
+Two things make that snippet work, and both are worth internalizing:
+
+1. `argon2.DefaultConfig().KeyLength` is `32`, and `aead.KeySize` is `32`. The KDF output plugs straight into the AEAD constructor with no truncation or padding.
+2. `aead.Encrypt` generates its own nonce and prepends it, so the only thing you have to persist alongside the ciphertext is the salt.
+
+:::tip[Choose the KDF by input entropy, not by habit]
+`argon2` is deliberately slow and memory-hard because its input is a low-entropy human password. If your input is *already* a uniformly random 32-byte secret — an X25519 shared secret, a master key from an HSM, a threshold-signing output — use `subtle.ComputeHKDF` instead. Running Argon2 on high-entropy input buys you nothing but 64 MiB of allocation per call.
+:::
+
+## Sizes at a glance
+
+Every one of these is a compile-time constant in the package named, not a default you can override. Getting a size wrong is a constructor error, never a silent truncation.
+
+| Constant | Value | Where |
+| --- | --- | --- |
+| `aead.KeySize` | `32` | AES-256-GCM key — the only length accepted |
+| `aead.NonceSize` | `12` | GCM nonce, generated and prepended by `Encrypt` |
+| `aead.TagSize` | `16` | GCM authentication tag |
+| `daed.AESSIVKeySize` | `64` | AES-SIV double-length key: 32-byte CMAC key ‖ 32-byte CTR key |
+| `salt.DefaultSaltSize` | `32` | Recommended salt size |
+| `salt.MinSaltSize` / `salt.MaxSaltSize` | `16` / `1024` | Hard bounds enforced by `salt.Generate` |
+
+An `aead` ciphertext is therefore always `len(plaintext) + 28` bytes; an AES-SIV ciphertext is always `len(plaintext) + 16`. Neither carries a version byte or key identifier, so any framing you need is yours to add.
+
+## What stays your responsibility
+
+These packages cover the primitive, not the protocol. Everything below is out of scope for this layer and has to live in your application:
+
+- **Key lifetime and rotation.** Nothing tracks how many messages a key has protected, and nothing versions a key. `aead` will happily encrypt forever under one key.
+- **Salt and hash persistence.** `salt.SaltStore` is an in-memory map with no mutex; `argon2.HashPassword` is the only helper that packages a salt into something durable.
+- **Replay and freshness.** AEAD authenticity says "this ciphertext was produced by someone holding the key", never "recently" or "once". Bind timestamps or counters into the AAD.
+- **Rate limiting on password paths.** `argon2` makes each guess expensive; it does not make guessing impossible.
+- **Unicode normalization** of anything a human types, before both validation and derivation.
+
+## What this layer does not do
+
+:::warning[Read the caveats on each page]
+Several packages here are hand-rolled reimplementations of things the standard library already provides — `secure.SecureCompare`, `salt`'s internal `constantTimeCompare`, and `password.SecureCompare` are three separate copies of the same loop, none of which use `crypto/subtle`. `secure` does not lock pages into RAM. `password`'s entropy estimator is a length heuristic, not an entropy measurement. `argon2.EstimateTime` is a formula with no measurement behind it. Each page states exactly what the code does rather than what the name suggests.
+:::
+
+There is no key *storage* here — no keystore, no envelope format, no versioned header. `aead.Encrypt` hands you `nonce || ciphertext || tag` and nothing else; if you need an algorithm identifier or a key ID on the wire, you frame it yourself. Likewise there is no ChaCha20-Poly1305, no AES-128, and no streaming/chunked API: `aead` is AES-256-GCM one-shot only.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Randomized AEAD" href="/symmetric/aead" icon="lock-keyhole">
+    AES-256-GCM. The default for encrypting anything. Exact key size, nonce handling, and ciphertext layout.
+  </Card>
+  <Card title="Deterministic AEAD" href="/symmetric/deterministic-aead" icon="repeat">
+    AES-SIV with a 64-byte key. Nonce-free and misuse-resistant, at the cost of leaking plaintext equality.
+  </Card>
+  <Card title="Key derivation" href="/symmetric/key-derivation" icon="key-round">
+    Argon2id presets with exact parameters, PHC hash encoding, HKDF, and the X25519 ECDH trio.
+  </Card>
+  <Card title="Secret hygiene" href="/symmetric/secrets" icon="eye-off">
+    Zeroization, salts and the salt store, password policy, randomness — and what each one really guarantees.
+  </Card>
+</CardGroup>
+
+Everything outside this layer — signatures, threshold protocols, zero-knowledge proofs — is generic over the curve abstraction described in [Foundations: curves](/foundations/curves).

@@ -1,0 +1,390 @@
+---
+title: Threshold Ed25519
+description: t-of-n Ed25519 signing whose output verifies under a stock Ed25519 verifier, plus FROST threshold Schnorr on top of a dkg/frost result.
+sidebar:
+  order: 5
+  icon: key-round
+---
+
+Two packages, two different bargains.
+
+`ted25519/ted25519` produces **byte-for-byte standard Ed25519 signatures**. A verifier that has
+never heard of threshold cryptography — `crypto/ed25519`, a chain node, a JWT library — accepts
+them. That compatibility is the whole reason to use it, and it is what forces the package's
+unusual, and dangerous, nonce protocol.
+
+`ted25519/frost` produces FROST threshold Schnorr signatures. Cleaner protocol, three tidy rounds,
+works over any curve — but the output is a `(Z, C)` pair, not an Ed25519 signature, and needs
+`frost.Verify`.
+
+<CardGroup cols={2}>
+<Card title="ted25519/ted25519" icon="key-round">
+Pick this when the signature must be accepted by existing Ed25519 verifiers. Ed25519 only. Requires
+strict per-message nonce discipline.
+</Card>
+<Card title="ted25519/frost" icon="fingerprint">
+Pick this when you control the verifier. Curve-agnostic, three rounds, consumes a
+[`dkg/frost`](/threshold/dkg) result directly.
+</Card>
+</CardGroup>
+
+## Standard-compatible: `ted25519/ted25519`
+
+The package is a fork of Go's `crypto/ed25519` (itself a port of SUPERCOP `ref10`) with the
+threshold pieces added. It keeps the standard sizes:
+
+| Constant | Value |
+| --- | --- |
+| `PublicKeySize` | 32 |
+| `PrivateKeySize` | 64 (seed ‖ public key) |
+| `SignatureSize` | 64 (R ‖ s) |
+| `SeedSize` | 32 |
+
+Single-party helpers are drop-in: `GenerateKey(rand io.Reader)`, `NewKeyFromSeed(seed []byte)`,
+`Sign(priv, msg)`, `Verify(pub, msg, sig)`, plus `PrivateKey.Public()`, `.Seed()`, and a
+`crypto.Signer` implementation.
+
+### Why the seed must be expanded before splitting
+
+Standard Ed25519 signing hashes the seed to derive the actual scalar. That hash destroys linearity:
+shares of the *seed* are not shares of the *signing scalar*, so partial signatures would not
+aggregate. `ExpandSeed(seed []byte) []byte` applies that transform up front, and the split happens
+on the expanded value. `ThresholdSign` therefore skips the expansion step that ordinary Ed25519
+signing performs — which is exactly why it cannot be replaced with `Sign`.
+
+### t-of-n signing
+
+Every party contributes a nonce, all nonce shares are summed, and each party produces a partial
+signature under the summed nonce. `Aggregate` interpolates the `s` components.
+
+```go
+import (
+	"github.com/sonr-io/crypto/ted25519/ted25519"
+)
+
+func thresholdSign() error {
+	config := ted25519.ShareConfiguration{T: 2, N: 3}
+
+	// 1. Shared key generation (trusted dealer — see the caveat below).
+	pub, secretShares, keyCommitments, err := ted25519.GenerateSharedKey(&config)
+	if err != nil {
+		return err
+	}
+
+	// Each holder can check its own share against the VSS commitments.
+	for _, s := range secretShares {
+		ok, err := s.VerifyVSS(keyCommitments, &config)
+		if err != nil || !ok {
+			return fmt.Errorf("bad share")
+		}
+	}
+
+	message := ted25519.Message("test message")
+
+	// 2. Every party generates a nonce FOR THIS MESSAGE and shares it out.
+	noncePub1, nonceShares1, _, err := ted25519.GenerateSharedNonce(&config, secretShares[0], pub, message)
+	if err != nil {
+		return err
+	}
+	noncePub2, nonceShares2, _, err := ted25519.GenerateSharedNonce(&config, secretShares[1], pub, message)
+	if err != nil {
+		return err
+	}
+	noncePub3, nonceShares3, _, err := ted25519.GenerateSharedNonce(&config, secretShares[2], pub, message)
+	if err != nil {
+		return err
+	}
+
+	// 3. Sum the nonce shares index-wise, and the nonce pubkeys in the group.
+	nonceShares := []*ted25519.NonceShare{
+		nonceShares1[0].Add(nonceShares2[0]).Add(nonceShares3[0]),
+		nonceShares1[1].Add(nonceShares2[1]).Add(nonceShares3[1]),
+		nonceShares1[2].Add(nonceShares2[2]).Add(nonceShares3[2]),
+	}
+	noncePub := ted25519.GeAdd(ted25519.GeAdd(noncePub1, noncePub2), noncePub3)
+
+	// 4. Each party produces a partial signature.
+	sig1 := ted25519.TSign(message, secretShares[0], pub, nonceShares[0], noncePub)
+	sig2 := ted25519.TSign(message, secretShares[1], pub, nonceShares[1], noncePub)
+
+	// 5. Any T partials aggregate into a complete signature.
+	sig, err := ted25519.Aggregate([]*ted25519.PartialSignature{sig1, sig2}, &config)
+	if err != nil {
+		return err
+	}
+
+	// 6. And it verifies under the ordinary Ed25519 verifier.
+	ok, err := ted25519.Verify(pub, message, sig)
+	if err != nil || !ok {
+		return fmt.Errorf("signature failed verification")
+	}
+	return nil
+}
+```
+
+:::success[This is a plain Ed25519 signature]
+`sig` is 64 bytes of `R ‖ s` over the 32-byte public key `pub`. `crypto/ed25519.Verify` accepts it
+too. Nothing downstream needs to know a threshold protocol produced it — that is this package's
+entire value proposition.
+:::
+
+Note that **every** participant must run `GenerateSharedNonce`, not just the `T` who will sign.
+The nonce is the sum of all `N` contributions; a missing contribution changes `noncePub` and every
+partial signature becomes invalid.
+
+### Types
+
+<TypeTable
+  type={{
+    "ShareConfiguration.T": { type: "int", required: true, description: "Threshold — partial signatures needed to aggregate." },
+    "ShareConfiguration.N": { type: "int", required: true, description: "Total shares issued." },
+    "KeyShare": { type: "struct{ *v1.ShamirShare }", required: true, description: "A share of the expanded signing scalar. Construct with NewKeyShare(identifier byte, secret []byte); serialise with Bytes(), restore with KeyShareFromBytes." },
+    "NonceShare": { type: "struct{ *KeyShare }", required: true, description: "A share of a per-message nonce. Add(other) sums two shares with the same identifier. NewNonceShare / NonceShareFromBytes mirror KeyShare." },
+    "Commitments": { type: "[]curves.Point", required: true, description: "VSS commitments to the polynomial coefficients. CommitmentsToBytes / CommitmentsFromBytes for transport." },
+    "PartialSignature.ShareIdentifier": { type: "byte", required: true, description: "Which signer produced this partial — the x-coordinate." },
+    "PartialSignature.Sig": { type: "[]byte", required: true, description: "64 bytes, R ‖ s. R() and S() slice it; Bytes() returns identifier ‖ Sig." },
+  }}
+/>
+
+Supporting functions: `PublicKeyFromBytes(bytes []byte)` (length-checks 32 bytes and returns them),
+`GeAdd(a, b PublicKey) PublicKey` (group addition of two public keys, used to sum nonce pubkeys),
+`Reconstruct(keyShares []*KeyShare, config *ShareConfiguration) ([]byte, error)`, and
+`ThresholdSign(expandedSecretKeyShare []byte, publicKey PublicKey, message []byte, rShare []byte, R PublicKey) []byte` —
+the raw form behind `TSign`, taking **little-endian** scalar bytes.
+
+:::danger[Never reuse a nonce share across messages]
+Ed25519, like every Schnorr-family scheme, leaks the signing key if two signatures over
+*different* messages share the same nonce `R`. Given `s₁ = r + c₁·sk` and `s₂ = r + c₂·sk` with the
+same `r`, anyone computes `sk = (s₁ − s₂)/(c₁ − c₂)`. In a threshold setting this is worse, not
+better: the attacker only needs the two aggregate signatures, which are public.
+
+`GenerateSharedNonce` takes the message `m` as an argument for exactly this reason — the nonce is
+derived per message. The source is explicit that determinism was deliberately avoided:
+
+> We _must_ introduce randomness to the HKDF to make the output non-deterministic because
+> deterministic nonces open up threshold schemes to potential nonce-reuse attacks. We continue to
+> use the HKDF that takes in context about what is going to be signed as it adds some protection
+> against bad local randomness.
+
+Concretely, the HKDF is keyed on `keyShare ‖ 32 fresh random bytes` with
+`info = "ted25519nonce" ‖ publicKey ‖ message`. So the rules are:
+
+- Call `GenerateSharedNonce` **once per message per party**. Never cache the result.
+- Never persist a `NonceShare`. If a signing attempt aborts, discard every nonce share and start a
+  fresh nonce round — do not retry with the old one.
+- Never sign two different messages with the same `noncePub`.
+- Do not "optimise" by making the nonce deterministic in the message. Two parties disagreeing about
+  the message set while sharing a nonce is the same catastrophe.
+:::
+
+:::danger[Not constant time, on secret values, by the source's own admission]
+Two `WARN` comments sit directly on the secret-handling paths:
+
+- In `generateSharableNonce`: *"WARN: This operation is not constant time and we are dealing with a
+  secret value"* — the rejection-sampling loop that reduces the nonce into the field.
+- In `NonceShare.Add`: *"WARN: This is not constant time and deals with secrets"* — the
+  `big.Int`-backed `curves.Element` addition.
+
+`TSign`, `Aggregate`, and `Reconstruct` go through the same arithmetic. Do not run this where an
+attacker can measure your timing.
+:::
+
+:::warning[GenerateSharedKey is dealer-based, and there is no DKG for this package]
+`GenerateSharedKey` samples a key, expands it, and splits it — all in one process. There is no
+distributed alternative that yields standard-Ed25519-compatible shares in this repository.
+`dkg/frost` produces shares of a `curves.Scalar` in the modern representation, which is not
+interchangeable with the little-endian, field-reduced, expanded-seed representation this package
+requires. If dealerless generation is a requirement, use `ted25519/frost` and accept the
+non-standard signature format.
+:::
+
+:::warning[Built on the legacy sharing layer, with its truncation defect]
+`KeyShare` embeds `*v1.ShamirShare` and `Reconstruct` calls `v1.Shamir.Combine`, which
+[interpolates only the first `T` shares you pass](/threshold/secret-sharing) and silently ignores
+the rest. `VerifyVSS` also requires `len(commitments) >= config.T` and returns
+`(false, error)` rather than a typed failure — check both return values.
+:::
+
+:::info[Endianness will bite you]
+The Ed25519 reference code is little-endian; `curves.Field`/`curves.Element` are big-endian. The
+package reverses bytes at nearly every boundary (`ThresholdSign` documents that
+`expandedSecretKeyShare` and `rShare` "must be little-endian"). If you hand-roll anything with
+these types rather than using `TSign`, expect to get this wrong at least once. Prefer the high-level
+helpers.
+:::
+
+:::note[The 2-of-2 example in the tests is not a protocol]
+`twobytwo_test.go` demonstrates a simpler additive scheme with a file comment saying so plainly:
+*"We don't intend to use it and it is not modeled off of any specific known protocol."* Do not copy
+it into production.
+:::
+
+## FROST Schnorr: `ted25519/frost`
+
+Three rounds implementing the signing half of
+[eprint 2020/852](https://eprint.iacr.org/2020/852.pdf), consuming a
+[`dkg/frost`](/threshold/dkg) participant directly. Despite the directory name it is not
+Ed25519-specific — it is generic over `curves.Curve`, and Ed25519 is one available challenge
+derivation.
+
+```go
+import (
+	"github.com/sonr-io/crypto/core/curves"
+	dkg "github.com/sonr-io/crypto/dkg/frost"
+	"github.com/sonr-io/crypto/sharing"
+	"github.com/sonr-io/crypto/ted25519/frost"
+)
+
+// participants is the output of a completed dkg/frost run, keyed by id.
+func frostSign(curve *curves.Curve, participants map[uint32]*dkg.DkgParticipant) error {
+	threshold, limit := uint32(2), uint32(3)
+
+	// Choose the signing set and precompute its Lagrange coefficients once.
+	signerIds := []uint32{1, 3}
+	scheme, err := sharing.NewShamir(threshold, limit, curve)
+	if err != nil {
+		return err
+	}
+	lCoeffs, err := scheme.LagrangeCoeffs(signerIds)
+	if err != nil {
+		return err
+	}
+
+	signers := make(map[uint32]*frost.Signer, len(signerIds))
+	for _, id := range signerIds {
+		signers[id], err = frost.NewSigner(
+			participants[id], id, threshold, lCoeffs, signerIds,
+			&frost.Ed25519ChallengeDeriver{},
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	// --- Round 1: commit to nonces -------------------------------------
+	round2Input := make(map[uint32]*frost.Round1Bcast, len(signers))
+	for id := range signers {
+		out, err := signers[id].SignRound1()
+		if err != nil {
+			return err
+		}
+		round2Input[id] = out
+	}
+
+	// --- Round 2: partial signatures -----------------------------------
+	msg := []byte("message")
+	round3Input := make(map[uint32]*frost.Round2Bcast, len(signers))
+	for id := range signers {
+		out, err := signers[id].SignRound2(msg, round2Input)
+		if err != nil {
+			return err
+		}
+		round3Input[id] = out
+	}
+
+	// --- Round 3: aggregate --------------------------------------------
+	for id := range signers {
+		out, err := signers[id].SignRound3(round3Input)
+		if err != nil {
+			return err
+		}
+		// Every signer derives the identical signature (out.Z, out.C).
+		_ = out
+	}
+	return nil
+}
+```
+
+<Steps>
+<Step title="SignRound1() (*Round1Bcast, error)">
+The signer samples two secret nonces `d_i`, `e_i` and **broadcasts their commitments**
+`Round1Bcast{Di, Ei curves.Point}` — the two group elements only. Both secret nonces stay local.
+Two commitments rather than one is what lets FROST bind the final nonce to the whole signing set
+without an extra round.
+</Step>
+<Step title="SignRound2(msg []byte, round2Input map[uint32]*Round1Bcast) (*Round2Bcast, error)">
+Consumes every signer's round-1 broadcast (keyed by signer id, **including your own**), derives the
+binding factors and the joint nonce `R`, derives the challenge `c` via the injected
+`ChallengeDerive`, and **broadcasts** `Round2Bcast{Zi curves.Scalar, Vki curves.Point}` — this
+signer's partial signature `Zi` and its verification-key share `Vki`, which lets peers attribute
+and check the partial.
+</Step>
+<Step title="SignRound3(round3Input map[uint32]*Round2Bcast) (*Round3Bcast, error)">
+Consumes every partial, validates each against its `Vki`, and sums them. Returns
+`Round3Bcast{R curves.Point, Z, C curves.Scalar}`. Every honest signer produces the identical
+`Z` and `C`, so there is no separate coordinator role — whoever needs the signature simply keeps
+its own round-3 output.
+</Step>
+</Steps>
+
+### Verifying
+
+```go
+sig := &frost.Signature{Z: out.Z, C: out.C}
+ok, err := frost.Verify(curve, &frost.Ed25519ChallengeDeriver{}, vk, msg, sig)
+```
+
+`vk` is the joint verification key from DKG (`participant.VerificationKey`). The same
+`ChallengeDerive` used for signing must be used for verification.
+
+```go
+type ChallengeDerive interface {
+	DeriveChallenge(msg []byte, pubKey curves.Point, r curves.Point) (curves.Scalar, error)
+}
+```
+
+`Ed25519ChallengeDeriver` is the implementation shipped in this package. A Mina-flavoured deriver
+lives with the [chain signature schemes](/signatures/chain-schemes). Supplying your own is how you
+adapt FROST to another verifier's challenge convention — and is also how you break interoperability
+if you get it wrong.
+
+`Round1Bcast` and `Round2Bcast` each provide `Encode() ([]byte, error)` and
+`Decode(input []byte) error` for transport. `Round3Bcast` does not — it is a local output, not a
+message.
+
+### Caveats
+
+:::warning[Lagrange coefficients pin the signing set]
+`NewSigner` takes `lcoeffs map[uint32]curves.Scalar` and `cosigners []uint32`. The coefficients are
+precomputed for that exact set — the constructor doc cites this as the optimisation from paragraph 3
+of section 3 of the FROST draft. **Every signer must be constructed with the same `cosigners` and
+the same `lcoeffs`.** Change the set and you must build fresh `Signer` values with fresh
+coefficients; reusing stale coefficients yields a signature that fails verification, with no
+diagnostic pointing at the cause.
+:::
+
+:::danger[One Signer, one signature]
+The nonces sampled in `SignRound1` are single-use, and the round counter enforces it: calling
+`SignRound1` twice on the same `Signer` returns an error. Construct a new `Signer` per signature.
+Never persist a `Signer` between signatures, and never reuse round-1 broadcasts for a second
+message — that is nonce reuse and it discloses the signing share.
+:::
+
+:::warning[Inherits dkg/frost's context-string defect]
+`frost.NewSigner` takes a `*dkg.DkgParticipant` whose `ctx` was collapsed to a single byte at
+construction time. That flaw belongs to
+[DKG](/threshold/dkg) and is not repaired here — the signing rounds provide no additional
+cross-session replay protection.
+:::
+
+:::note[No aggregate-only role, no identifiable abort]
+Every signer runs all three rounds; there is no lightweight aggregator. And a failed partial-signature
+check aborts without producing transferable evidence of which signer cheated.
+:::
+
+## Next
+
+<CardGroup cols={2}>
+<Card title="Distributed Key Generation" href="/threshold/dkg" icon="git-branch">
+`ted25519/frost` needs a completed `dkg/frost` participant as its input.
+</Card>
+<Card title="Chain Signature Schemes" href="/signatures/chain-schemes" icon="link">
+Where the Mina challenge deriver lives.
+</Card>
+<Card title="Secret Sharing" href="/threshold/secret-sharing" icon="split">
+`LagrangeCoeffs`, and the legacy `v1` layer `ted25519/ted25519` is built on.
+</Card>
+<Card title="Threshold ECDSA" href="/threshold/threshold-ecdsa" icon="pen-tool">
+The 2-of-2 ECDSA side of the house.
+</Card>
+</CardGroup>

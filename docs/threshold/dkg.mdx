@@ -1,0 +1,440 @@
+---
+title: Distributed Key Generation
+description: FROST, Gennaro, and 2-party Gennaro DKG — interactive protocols that produce a signing key no single participant ever holds.
+sidebar:
+  order: 3
+  icon: git-branch
+---
+
+DKG replaces the trusted dealer. Instead of one process splitting a key it already has, every
+participant samples its own contribution, publishes a verifiable commitment to it, and privately
+sends one share to each peer. The joint signing key is the sum of every contribution; each party
+ends up holding a Shamir share of that sum plus the joint public key. The key itself is never
+assembled — not during generation, and not during signing.
+
+Three protocols live here, and they are not interchangeable.
+
+<CardGroup cols={3}>
+<Card title="dkg/frost" icon="git-branch">
+2 rounds, t-of-n, modern `curves.Curve` API. Feeds
+[`ted25519/frost`](/threshold/threshold-ed25519) Schnorr signing.
+</Card>
+<Card title="dkg/gennaro" icon="git-branch">
+4 rounds, t-of-n, built on legacy [`sharing/v1`](/threshold/secret-sharing). Produces the
+public shares tECDSA signing wants.
+</Card>
+<Card title="dkg/gennaro2p" icon="users">
+2-of-2 façade over `dkg/gennaro`. Two rounds plus `Finalize`, one message type per round.
+</Card>
+</CardGroup>
+
+:::note[These are not the DKG used by tecdsa/dklsv1]
+`tecdsa/dklsv1` has its own embedded DKLs18 DKG. Nothing in this page feeds it. See
+[Threshold ECDSA](/threshold/threshold-ecdsa).
+:::
+
+## FROST DKG — `dkg/frost`
+
+Two rounds, implementing the DKG half of [eprint 2020/852](https://eprint.iacr.org/2020/852.pdf)
+(the citation is in the package doc comment). Each participant runs Feldman VSS on its own secret
+and attaches a Schnorr proof of knowledge of the constant coefficient, which is what stops a
+participant from biasing the joint key by choosing its contribution after seeing everyone else's.
+
+```go
+import (
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/dkg/frost"
+	"github.com/sonr-io/crypto/sharing"
+)
+
+func twoPartyFrostDkg() error {
+	curve := curves.ED25519()
+	ctx := "1" // see the ctx warning below
+
+	// Each participant knows its own id and the ids of all the others.
+	p1, err := frost.NewDkgParticipant(1, 2, ctx, curve, 2)
+	if err != nil {
+		return err
+	}
+	p2, err := frost.NewDkgParticipant(2, 2, ctx, curve, 1)
+	if err != nil {
+		return err
+	}
+
+	// --- Round 1 --------------------------------------------------------
+	bcast1, p2pSend1, err := p1.Round1(nil) // nil => sample a fresh secret
+	if err != nil {
+		return err
+	}
+	bcast2, p2pSend2, err := p2.Round1(nil)
+	if err != nil {
+		return err
+	}
+
+	// Broadcasts go to everyone, keyed by SENDER id, and include your own.
+	bcast := map[uint32]*frost.Round1Bcast{1: bcast1, 2: bcast2}
+
+	// P2P inputs are keyed by SENDER id too: p2p1[2] is what participant 2
+	// sent to participant 1, i.e. p2pSend2[1].
+	p2p1 := map[uint32]*sharing.ShamirShare{2: p2pSend2[1]}
+	p2p2 := map[uint32]*sharing.ShamirShare{1: p2pSend1[2]}
+
+	// --- Round 2 --------------------------------------------------------
+	if _, err = p1.Round2(bcast, p2p1); err != nil {
+		return err
+	}
+	if _, err = p2.Round2(bcast, p2p2); err != nil {
+		return err
+	}
+
+	// p1.SkShare, p1.VkShare, p1.VerificationKey are now populated,
+	// and p1.VerificationKey == p2.VerificationKey.
+	_ = p1.SkShare
+	return nil
+}
+```
+
+<Steps>
+<Step title="Round1(secret []byte) (*Round1Bcast, Round1P2PSend, error)">
+Samples (or accepts) a secret `s`, runs Feldman VSS to get `threshold` commitments and `limit`
+shares, samples a nonce `k`, and computes the Schnorr-style proof `c = H(i, CTX, a_0·G, k·G)`,
+`w = s·c + k`.
+
+**Broadcast** (`*Round1Bcast`): the `*sharing.FeldmanVerifier` and the two scalars `Wi`, `Ci`.
+**Point-to-point** (`Round1P2PSend`, a type alias for `map[uint32]*sharing.ShamirShare`): one
+private share per peer, keyed by that peer's id. Send `p2pSend[j]` to participant `j` only.
+
+Pass `nil` for `secret` to sample. Passing a secret enables reshare-style flows, but a zero or
+out-of-range value is rejected (`internal.ErrZeroValue` or a scalar decode error).
+</Step>
+<Step title="Round2(bcast, p2psend) (*Round2Bcast, error)">
+For every peer: recomputes `c_j` and aborts unless it matches the broadcast `Ci` (this verifies the
+proof of knowledge), then runs `FeldmanVerifier.Verify` on the private share that peer sent. Both
+maps are keyed by *sender* id; `bcast` must include your own entry, `p2psend` must not.
+
+Then sums the shares into the signing share and sums every peer's `Commitments[0]` into the joint
+verification key.
+
+Sets `SkShare` (`curves.Scalar`), `VkShare` (`curves.Point`, `= SkShare · G`), and
+`VerificationKey` (`curves.Point`, the joint public key) on the participant, and returns the latter
+two as `*Round2Bcast`.
+</Step>
+</Steps>
+
+### Result fields
+
+<TypeTable
+  type={{
+    Id: { type: "uint32", required: true, description: "This participant's identifier." },
+    Curve: { type: "*curves.Curve", required: true, description: "The curve the DKG ran on." },
+    SkShare: {
+      type: "curves.Scalar",
+      required: true,
+      description: "Secret signing share. Set by Round2. This is the value to persist and protect.",
+    },
+    VkShare: {
+      type: "curves.Point",
+      required: true,
+      description: "SkShare · G. Public; lets peers attribute a partial signature to this id.",
+    },
+    VerificationKey: {
+      type: "curves.Point",
+      required: true,
+      description: "The joint public key. Identical across all participants after Round2.",
+    },
+  }}
+/>
+
+The `SkShare` values are ordinary Shamir shares of the joint key, so
+`sharing.NewShamir(t, n, curve).Combine(...)` over `{Id, SkShare.Bytes()}` pairs reconstructs it —
+which the package's own test does to prove correctness, and which production code should never do.
+
+### Transport
+
+`Round1Result` bundles the two halves of round 1 for one recipient:
+
+```go
+result := &frost.Round1Result{Broadcast: bcast1, P2P: p2pSend1[2]}
+wire, err := result.Encode() // gob
+// ...
+decoded := &frost.Round1Result{}
+err = decoded.Decode(wire)
+```
+
+`Encode` uses `encoding/gob` and registers the concrete commitment point and `Ci` scalar types on
+each call. There is no matching helper for round 2 — serialise `Round2Bcast` yourself.
+
+:::danger[The ctx string is silently reduced to a single byte, usually zero]
+`NewDkgParticipant` takes `ctx string` as the fixed context string that binds the Schnorr proofs to
+this DKG session. The implementation does:
+
+```go
+ctxV, _ := strconv.Atoi(ctx)   // error discarded
+// ...
+ctx: byte(ctxV),
+```
+
+Two consequences. First, any non-numeric `ctx` — including the package's own test value
+`"string to prevent replay attack"` — fails `Atoi`, the error is thrown away, and the stored context
+becomes the byte `0`. Every such session shares an identical context. Second, even a numeric `ctx`
+is truncated to one byte, so `"1"`, `"257"`, and `"513"` are indistinguishable.
+
+The context string therefore provides **no meaningful domain separation as implemented**. Do not
+rely on it to prevent cross-session replay of round-1 broadcasts; enforce session freshness at your
+transport layer. The participant `Id` is hashed as `byte(dp.Id)` and has the same truncation
+problem for ids ≥ 256.
+:::
+
+:::warning[Round order is enforced; the error is not exported]
+Each participant holds an internal round counter. Calling `Round1` twice, or `Round2` before
+`Round1`, returns `internal.ErrInvalidRound` — `"invalid round method called"`. Because
+`internal` is not importable, you cannot match that sentinel from outside the module; you only get
+the message. The same is true of `internal.ErrNilArguments` (`"arguments cannot be nil"`), returned
+for a nil curve, an empty `otherParticipants` list, or nil round-2 maps.
+:::
+
+## Gennaro DKG — `dkg/gennaro`
+
+Four rounds, implementing the DKG of [eprint 2020/540](https://eprint.iacr.org/2020/540.pdf) (cited
+in the package doc). The extra rounds buy a two-phase VSS that FROST's single Feldman pass does not
+provide.
+
+```go
+import (
+	"math/big"
+
+	"github.com/btcsuite/btcd/btcec/v2"
+
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/dkg/gennaro"
+)
+
+func twoPartyGennaroDkg() error {
+	// The blinding generator for Pedersen VSS. Must have unknown discrete log
+	// w.r.t. the base point in real use — this fixed multiple is test-only.
+	generator, err := curves.NewScalarBaseMult(btcec.S256(), big.NewInt(3333))
+	if err != nil {
+		return err
+	}
+
+	p1, err := gennaro.NewParticipant(1, 2, generator, curves.NewK256Scalar(), 2)
+	if err != nil {
+		return err
+	}
+	p2, err := gennaro.NewParticipant(2, 2, generator, curves.NewK256Scalar(), 1)
+	if err != nil {
+		return err
+	}
+
+	// Round 1
+	bcast1, p2pSend1, err := p1.Round1(nil)
+	if err != nil {
+		return err
+	}
+	bcast2, p2pSend2, err := p2.Round1(nil)
+	if err != nil {
+		return err
+	}
+	bcast := map[uint32]gennaro.Round1Bcast{1: bcast1, 2: bcast2}
+	p2p1 := map[uint32]*gennaro.Round1P2PSendPacket{2: p2pSend2[1]}
+	p2p2 := map[uint32]*gennaro.Round1P2PSendPacket{1: p2pSend1[2]}
+
+	// Round 2
+	r2out1, err := p1.Round2(bcast, p2p1)
+	if err != nil {
+		return err
+	}
+	r2out2, err := p2.Round2(bcast, p2p2)
+	if err != nil {
+		return err
+	}
+	round3Input := map[uint32]gennaro.Round2Bcast{1: r2out1, 2: r2out2}
+
+	// Round 3 — yields the joint public key and this party's secret share
+	pubKey1, share1, err := p1.Round3(round3Input)
+	if err != nil {
+		return err
+	}
+	if _, _, err = p2.Round3(round3Input); err != nil {
+		return err
+	}
+
+	// Round 4 — public shares for tECDSA signing (idempotent)
+	publicShares1, err := p1.Round4()
+	if err != nil {
+		return err
+	}
+	_, _, _ = pubKey1, share1, publicShares1
+	return nil
+}
+```
+
+<Steps>
+<Step title="Round1(secret []byte) (Round1Bcast, Round1P2PSend, error)">
+Pedersen-committed sharing. The participant runs Pedersen VSS on its secret, producing a secret
+polynomial and a blinding polynomial. `Round1Bcast` is a type alias for `[]*v1.ShareVerifier` — the
+`threshold` *blinded* commitments `a_j·G + b_j·H`, which reveal nothing about the secret.
+`Round1P2PSend` maps each peer id to a `*Round1P2PSendPacket` carrying that peer's `SecretShare`
+and its matching `BlindingShare`.
+
+Passing a non-nil `secret` performs proactive secret resharing rather than fresh key generation:
+the public key stays the same and only the shares change.
+</Step>
+<Step title="Round2(bcast, p2p) (Round2Bcast, error)">
+Verifies every received `(secretShare, blindingShare)` pair against the sender's blinded
+commitments, then de-blinds: broadcasts the *unblinded* Feldman commitments `a_j·G` as
+`Round2Bcast` (also `[]*v1.ShareVerifier`). Splitting the commit and reveal across two rounds is
+what makes the joint key unbiasable — nobody can see any `a_0·G` until every participant has
+already committed.
+</Step>
+<Step title="Round3(bcast) (*Round3Bcast, *v1.ShamirShare, error)">
+Checks each peer's Feldman commitments against the Pedersen commitments it already holds, then
+assembles the joint public key. Returns the verification key (`*Round3Bcast`, an alias for
+`v1.ShareVerifier`) and this participant's secret share.
+</Step>
+<Step title="Round4() (map[uint32]*curves.EcPoint, error)">
+Computes the per-participant public shares that tECDSA signing needs — `skShare_i · G` for every
+`i` — which get converted to additive shares once the signing set is known. Takes no arguments and
+is idempotent: calling it repeatedly returns the same map.
+</Step>
+</Steps>
+
+:::warning[Participant ids must be exactly 1..n]
+`NewParticipant` runs `validIds(append(otherParticipants, id))`, which requires the id set to be
+precisely the integers `1, 2, …, n`. `NewParticipant(3, 2, gen, scalar, 4)` fails; so does an id of
+`0`, and so does any set with a gap. FROST does not impose this — only Gennaro does.
+:::
+
+:::note[Built on the legacy sharing layer]
+`dkg/gennaro` uses `sharing/v1` throughout: `*curves.EcPoint` instead of `curves.Point`,
+`*curves.Element` instead of `curves.Scalar`, `*v1.ShamirShare` instead of `*sharing.ShamirShare`,
+and `elliptic.Curve` instead of `*curves.Curve`. Reconstruction of its shares therefore goes through
+`v1.NewShamir(t, n, curves.NewField(btcec.S256().N))`, which inherits the
+[`v1.Shamir.Combine` truncation defect](/threshold/secret-sharing). The `scalar curves.EcScalar`
+argument supplies curve-specific scalar arithmetic — `curves.NewK256Scalar()` for secp256k1.
+:::
+
+## 2-party Gennaro — `dkg/gennaro2p`
+
+A façade over `dkg/gennaro` specialised for the 2-of-2 case. Its package doc states the
+simplification directly: no distinction between broadcast and peer messages, and only the
+counterparty's message is used as round input because self-inputs are always ignored.
+
+```go
+import (
+	"github.com/btcsuite/btcd/btcec/v2"
+
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/dkg/gennaro2p"
+)
+
+func twoPartyDkg() (*gennaro2p.DkgResult, *gennaro2p.DkgResult, error) {
+	curve := btcec.S256()
+	scalar := curves.NewK256Scalar()
+
+	// Passing nil blind makes the client generate a secure blinding generator.
+	client, err := gennaro2p.NewParticipant(1, 2, nil, scalar, curve)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Round 1 carries the blind, so the server can adopt the client's.
+	clientR1, err := client.Round1(nil)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	server, err := gennaro2p.NewParticipant(2, 1, clientR1.Blind, scalar, curve)
+	if err != nil {
+		return nil, nil, err
+	}
+	serverR1, err := server.Round1(nil)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Round 2 consumes the *counterparty's* round 1 output.
+	clientR2, err := client.Round2(serverR1)
+	if err != nil {
+		return nil, nil, err
+	}
+	serverR2, err := server.Round2(clientR1)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Finalize consumes the counterparty's round 2 output.
+	clientResult, err := client.Finalize(serverR2)
+	if err != nil {
+		return nil, nil, err
+	}
+	serverResult, err := server.Finalize(clientR2)
+	if err != nil {
+		return nil, nil, err
+	}
+	return clientResult, serverResult, nil
+}
+```
+
+<Steps>
+<Step title="Round1(secret []byte) (*Round1Message, error)">
+Wraps `gennaro.Round1`. Returns one flat message carrying `Verifiers []*v1.ShareVerifier`,
+`SecretShare`, `BlindingShare`, and `Blind *curves.EcPoint`.
+</Step>
+<Step title="Round2(msg *Round1Message) (*Round2Message, error)">
+Wraps `gennaro.Round2` with the counterparty's round-1 message as the sole input. Returns
+`Round2Message{Verifiers}`.
+</Step>
+<Step title="Finalize(msg *Round2Message) (*DkgResult, error)">
+Runs `gennaro.Round3` and `gennaro.Round4` back to back and packages the outcome as
+`DkgResult{PublicKey *curves.EcPoint, SecretShare *v1.ShamirShare, PublicShares map[uint32]*curves.EcPoint}`.
+</Step>
+</Steps>
+
+:::tip[Blind synchronisation is the caller's job]
+`NewParticipant`'s doc says the blind "must be a generator and must be synchronised between
+counterparties. The first participant can set it to `nil` and a secure blinding factor will be
+generated." The generated blind is echoed in `Round1Message.Blind`, so the practical ordering is:
+party A constructs with `nil` and runs `Round1`, then party B constructs with `Blind` taken from A's
+round-1 message. The blind-generation helper itself is unexported, so `nil` is the only way to get
+one. Do **not** pass the base point or a known multiple of it — see the
+[Pedersen generator warning](/threshold/secret-sharing).
+:::
+
+## Caveats
+
+:::warning[No identifiable abort]
+None of these protocols tell you *who* misbehaved. Verification failures surface as messages like
+`"feldman verify fails for participant with id 2"` (FROST does name the id) or a bare `"not equal"`
+(the underlying VSS check). Aborting is correct, but you get no cryptographic evidence to present to
+a third party, so a participant can grief the protocol repeatedly without penalty.
+:::
+
+:::warning[No transport, no authentication, no replay protection]
+These packages produce and consume Go values. Delivering broadcasts to everyone, delivering each
+private share to exactly one recipient, authenticating senders, and rejecting replayed round
+messages are all your responsibility. Given the `ctx` defect above, replay protection in particular
+cannot be delegated to `dkg/frost`.
+:::
+
+:::note[Round methods mutate the participant and are not goroutine-safe]
+Every round advances an internal counter and stores state on the participant. One participant
+value belongs to one goroutine.
+:::
+
+## Next
+
+<CardGroup cols={2}>
+<Card title="Threshold Ed25519" href="/threshold/threshold-ed25519" icon="key-round">
+`ted25519/frost` consumes a `dkg/frost` participant directly.
+</Card>
+<Card title="Threshold ECDSA" href="/threshold/threshold-ecdsa" icon="pen-tool">
+DKLs18 2-of-2, with its own embedded DKG.
+</Card>
+<Card title="Secret Sharing" href="/threshold/secret-sharing" icon="split">
+The Shamir/Feldman/Pedersen machinery all three protocols are built on.
+</Card>
+<Card title="Schnorr Proofs" href="/zero-knowledge/schnorr" icon="fingerprint">
+The proof of knowledge that keeps FROST's joint key unbiasable.
+</Card>
+</CardGroup>

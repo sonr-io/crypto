@@ -1,0 +1,367 @@
+---
+title: Bulletproofs
+description: Logarithmic-size inner-product argument and the single and batched range proofs built on top of it — plus the exported-API gap that currently makes the range layer callable only from inside the package.
+sidebar:
+  label: Bulletproofs
+  order: 4
+  icon: ruler
+---
+
+`bulletproof` implements the protocol of [eprint 2017/1066](https://eprint.iacr.org/2017/1066.pdf)
+in two layers, and the distinction between them is the most important thing on this page.
+
+The **inner-product argument** (IPP) is the engine. It proves knowledge of two scalar vectors
+whose dot product is a claimed value, in proof size logarithmic in the vector length: a
+length-256 pair of vectors yields 8 pairs of `L`/`R` points, not 256.
+
+The **range proof** is the application. It encodes a secret value as its bit vector, expresses
+"every bit is 0 or 1, and the bits sum to the committed value" as a single inner-product
+relation, and then delegates to the IPP. That is why one prover constructor takes *two*
+domain separators — the range layer and the IPP layer each need their own generator vectors.
+
+:::danger[The range-proof API cannot be called from another package today]
+`RangeProver.Prove`, `BatchProve`, `RangeVerifier.Verify`, and `VerifyBatched` all take a
+`RangeProofGenerators` value. That struct's three fields — `g`, `h`, `u` — are unexported,
+and the package exports no constructor, setter, or default for it. From outside
+`package bulletproof` the compiler rejects any attempt to populate it:
+
+```text
+cannot refer to unexported field g in struct literal of type bulletproof.RangeProofGenerators
+cannot refer to unexported field h in struct literal of type bulletproof.RangeProofGenerators
+cannot refer to unexported field u in struct literal of type bulletproof.RangeProofGenerators
+```
+
+A zero-valued `RangeProofGenerators{}` does compile, but its points are `nil`, so `Prove`
+panics on the first `proofGenerators.h.Mul(alpha)`. The verifier side has a second gap: it
+needs the Pedersen commitment `capV`, and the helper that builds it (`getcapV`) is
+unexported too.
+
+The IPP layer has the mirror-image problem: `InnerProductVerifier.Verify` needs `capP`, and
+the only thing that computes it is `InnerProductProver.getP`, whose own doc comment says
+"This method should only be used for testing" — and which is unexported regardless.
+
+The mathematics in this package is complete and its tests pass. The Go surface is not
+finished. Until `RangeProofGenerators` gains an exported constructor and the commitment
+helpers are exported, treat `bulletproof` as an in-repo building block rather than a public
+API, and read the examples below as descriptions of the in-package tests.
+:::
+
+## When to use it
+
+Range proofs are the right tool when a committed number must be shown to be well-formed
+without being revealed — confidential amounts that must be non-negative and non-overflowing,
+bounded bids, reserve proofs. The batched variant is the right tool when several such values
+are proved at once by the same party, because it amortises them into a single proof.
+
+They are the wrong tool for set membership (use the [accumulator](/zero-knowledge/accumulator)),
+for proving knowledge of a discrete log (use [Schnorr](/zero-knowledge/schnorr), which is
+orders of magnitude smaller and simpler), or for arbitrary statements — there is no
+general-purpose circuit layer here.
+
+## Layer 1: the inner-product argument
+
+<TypeTable
+  type={{
+    "NewInnerProductProver": {
+      type: "func(maxVectorLength int, domain []byte, curve curves.Curve) (*InnerProductProver, error)",
+      required: true,
+      description: "Derives 2·maxVectorLength generator points by hashing Shake256(domain) to the curve, split into the G and H vectors. Note the curve is passed by value, not pointer.",
+    },
+    "InnerProductProver.Prove": {
+      type: "func(a, b []curves.Scalar, u curves.Point, transcript *merlin.Transcript) (*InnerProductProof, error)",
+      required: true,
+      description: "Proves knowledge of a and b with the inner product blinded into P by u. len(a) must equal len(b), be a power of two, and be at most maxVectorLength.",
+    },
+    "NewInnerProductVerifier": {
+      type: "func(maxVectorLength int, domain []byte, curve curves.Curve) (*InnerProductVerifier, error)",
+      required: true,
+      description: "Must be constructed with the same maxVectorLength, domain, and curve as the prover, or the generators differ and verification fails.",
+    },
+    "InnerProductVerifier.Verify": {
+      type: "func(capP, u curves.Point, proof *InnerProductProof, transcript *merlin.Transcript) (bool, error)",
+      required: true,
+      description: "capP is the commitment ⟨G,a⟩ + ⟨H,b⟩ + ⟨a,b⟩·u. Returns (false, nil) — not an error — when the proof simply does not check out.",
+    },
+    "InnerProductVerifier.VerifyFromRangeProof": {
+      type: "func(proofG, proofH []curves.Point, capPhmuinv, u curves.Point, tHat curves.Scalar, proof *InnerProductProof, transcript *merlin.Transcript) (bool, error)",
+      description: "The entry point RangeVerifier.Verify uses. It takes explicit generator slices and the range proof's P·h^-mu instead of a plain capP.",
+    },
+    "NewInnerProductProof": {
+      type: "func(curve *curves.Curve) *InnerProductProof",
+      description: "An empty proof to unmarshal into. Pair it with UnmarshalBinary; do not use it for anything else.",
+    },
+  }}
+/>
+
+`MarshalBinary() []byte` on both `InnerProductProof` and `RangeProof` returns **no error** —
+an unusual signature that does not satisfy `encoding.BinaryMarshaler`. `UnmarshalBinary` does
+return an error, and must be called on a proof from the matching `New…Proof(curve)`
+constructor so that the curve is set.
+
+```go ipp.go
+// From bulletproof/ipp_verifier_test.go (TestIPPVerifyHappyPath).
+curve := curves.ED25519()
+vecLength := 256
+
+prover, err := bulletproof.NewInnerProductProver(vecLength, []byte("test"), *curve)
+if err != nil {
+	panic(err)
+}
+
+a := randScalarVec(vecLength, *curve) // in-package test helper
+b := randScalarVec(vecLength, *curve)
+u := curve.Point.Random(crand.Reader)
+
+transcriptProver := merlin.NewTranscript("test")
+proof, err := prover.Prove(a, b, u, transcriptProver)
+if err != nil {
+	panic(err)
+}
+// len(proof.capLs) == log2(256) == 8
+
+verifier, err := bulletproof.NewInnerProductVerifier(vecLength, []byte("test"), *curve)
+if err != nil {
+	panic(err)
+}
+capP, err := prover.getP(a, b, u) // unexported: see the danger callout
+if err != nil {
+	panic(err)
+}
+transcriptVerifier := merlin.NewTranscript("test")
+verified, err := verifier.Verify(capP, u, proof, transcriptVerifier)
+// verified == true
+```
+
+The Fiat-Shamir transcript is [merlin](https://github.com/gtank/merlin). Both sides construct
+it with the *same label* — `merlin.NewTranscript("test")` in the tests — and each side must
+start from a fresh transcript in the same state. A transcript is consumed by proving or
+verifying; you cannot reuse one.
+
+## Layer 2: range proofs
+
+<TypeTable
+  type={{
+    "NewRangeProver": {
+      type: "func(maxVectorLength int, rangeDomain, ippDomain []byte, curve curves.Curve) (*RangeProver, error)",
+      required: true,
+      description: "Two domains: rangeDomain seeds the bit-vector generators, ippDomain seeds the inner-product generators. They must differ from each other, and must match the verifier's exactly.",
+    },
+    "RangeProver.Prove": {
+      type: "func(v, gamma curves.Scalar, n int, proofGenerators RangeProofGenerators, transcript *merlin.Transcript) (*RangeProof, error)",
+      required: true,
+      description: "Proves the value v committed as gamma·h + v·g lies in [0, 2^n). gamma is the Pedersen blinding factor and must be kept secret.",
+    },
+    "RangeProver.BatchProve": {
+      type: "func(v, gamma []curves.Scalar, n int, proofGenerators RangeProofGenerators, transcript *merlin.Transcript) (*RangeProof, error)",
+      required: true,
+      description: "Aggregated proof for len(v) values, each in [0, 2^n). Requires n·len(v) ≤ maxVectorLength. Output is one RangeProof, not a slice.",
+    },
+    "NewRangeVerifier": {
+      type: "func(maxVectorLength int, rangeDomain, ippDomain []byte, curve curves.Curve) (*RangeVerifier, error)",
+      required: true,
+      description: "Same four arguments as the prover, or verification fails.",
+    },
+    "RangeVerifier.Verify": {
+      type: "func(proof *RangeProof, capV curves.Point, proofGenerators RangeProofGenerators, n int, transcript *merlin.Transcript) (bool, error)",
+      required: true,
+      description: "capV is the single Pedersen commitment gamma·h + v·g. n must equal the prover's n.",
+    },
+    "RangeVerifier.VerifyBatched": {
+      type: "func(proof *RangeProof, capV []curves.Point, proofGenerators RangeProofGenerators, n int, transcript *merlin.Transcript) (bool, error)",
+      description: "Takes one commitment per proved value, in the same order the prover passed v.",
+    },
+    "NewRangeProof": {
+      type: "func(curve *curves.Curve) *RangeProof",
+      description: "An empty proof to unmarshal into.",
+    },
+  }}
+/>
+
+### What the parameters actually mean
+
+**`n` is a bit width, and it defines the range.** `Prove` decodes `v` into an `n`-element bit
+vector via `getaL`, so the provable range is the set of values representable in `n` bits:
+`[0, 2^n)`. `n = 256` on ED25519 is the whole scalar field; `n = 64` is a u64-shaped amount.
+`n` must be a power of two, because the inner-product recursion halves the vectors at every
+step. The range prover does not check this up front — unlike `InnerProductProver.Prove`,
+which has an explicit `isPowerOfTwo` gate — so a non-power-of-two `n` surfaces late as
+`"length of scalars must be even"` from inside the recursion.
+
+**`maxVectorLength` is a generator budget, not the range.** The constructor precomputes
+`2 · maxVectorLength` curve points by hashing the domain. `Prove` requires
+`n <= maxVectorLength` and trims the generator vectors to `n`. `BatchProve` requires
+`n · len(v) <= maxVectorLength` — proving four 256-bit values needs
+`NewRangeProver(256*4, …)`, exactly as `range_batch_prover_test.go` does.
+
+**The two domains seed two independent generator sets.** `rangeDomain` produces the `G`/`H`
+vectors that commit to the bit vectors; `ippDomain` produces the generators for the nested
+inner-product argument. They must be distinct strings — reusing one string for both would
+make the two generator sets identical, which is not a configuration the protocol's security
+argument covers. The tests use `[]byte("rangeDomain")` and `[]byte("ippDomain")`.
+
+**`proofGenerators` holds `g`, `h`, `u`, and both sides must use the same three points.**
+`g` and `h` are the Pedersen bases for the value commitment; `u` blinds the inner product.
+Because the commitment `capV = gamma·h + v·g` is computed from `g` and `h`, a verifier with
+different points is verifying a commitment to a different value and gets `false`.
+
+### Single-value range proof
+
+Grounded in `bulletproof/range_prover_test.go` and `range_verifier_test.go`. The unexported
+identifiers are marked; they are why this cannot be lifted verbatim into your own package.
+
+```go range.go
+curve := curves.ED25519()
+n := 256
+
+prover, err := bulletproof.NewRangeProver(n, []byte("rangeDomain"), []byte("ippDomain"), *curve)
+if err != nil {
+	panic(err)
+}
+
+v := curve.Scalar.Random(crand.Reader)     // the secret value
+gamma := curve.Scalar.Random(crand.Reader) // the secret blinding factor
+
+g := curve.Point.Random(crand.Reader)
+h := curve.Point.Random(crand.Reader)
+u := curve.Point.Random(crand.Reader)
+proofGenerators := RangeProofGenerators{g: g, h: h, u: u} // unexported fields
+
+transcript := merlin.NewTranscript("test")
+proof, err := prover.Prove(v, gamma, n, proofGenerators, transcript)
+if err != nil {
+	panic(err)
+}
+
+// Verifier: same n, same domains, same curve, same g/h/u, fresh transcript
+// with the same label.
+verifier, err := bulletproof.NewRangeVerifier(n, []byte("rangeDomain"), []byte("ippDomain"), *curve)
+if err != nil {
+	panic(err)
+}
+transcriptVerifier := merlin.NewTranscript("test")
+capV := getcapV(v, gamma, g, h) // unexported: h.Mul(gamma).Add(g.Mul(v))
+verified, err := verifier.Verify(proof, capV, proofGenerators, n, transcriptVerifier)
+// verified == true
+```
+
+In production the verifier receives `capV` over the wire; it never learns `v` or `gamma`.
+The commitment is a plain Pedersen commitment, `h·gamma + g·v`, so you can compute it
+yourself with `core/curves` point arithmetic without touching this package.
+
+### Batched range proof
+
+`BatchProve` proves `m` values in one proof. From `range_batch_prover_test.go`, four
+256-bit values:
+
+```go batch.go
+curve := curves.ED25519()
+n := 256
+
+// maxVectorLength must cover n * m = 1024.
+prover, err := bulletproof.NewRangeProver(n*4, []byte("rangeDomain"), []byte("ippDomain"), *curve)
+if err != nil {
+	panic(err)
+}
+
+v := []curves.Scalar{
+	curve.Scalar.Random(crand.Reader),
+	curve.Scalar.Random(crand.Reader),
+	curve.Scalar.Random(crand.Reader),
+	curve.Scalar.Random(crand.Reader),
+}
+gamma := []curves.Scalar{
+	curve.Scalar.Random(crand.Reader),
+	curve.Scalar.Random(crand.Reader),
+	curve.Scalar.Random(crand.Reader),
+	curve.Scalar.Random(crand.Reader),
+}
+
+transcript := merlin.NewTranscript("test")
+proof, err := prover.BatchProve(v, gamma, n, proofGenerators, transcript)
+if err != nil {
+	panic(err)
+}
+// One proof, log2(1024) == 10 L/R pairs, covering all four values.
+
+verifier, _ := bulletproof.NewRangeVerifier(n*4, []byte("rangeDomain"), []byte("ippDomain"), *curve)
+capV := getcapVBatched(v, gamma, g, h) // unexported; one commitment per value
+verified, err := verifier.VerifyBatched(proof, capV, proofGenerators, n, merlin.NewTranscript("test"))
+// verified == true
+```
+
+Note that the batch call still takes the *per-value* bit width `n`, while the prover was
+constructed with `n*4`. Mixing those two up is the easiest way to get a confusing failure.
+`VerifyBatched` returns an error (rather than `false`) if a commitment in `capV` is tampered
+with in a way that breaks the point arithmetic — `range_batch_verifier_test.go` exercises
+that path — but a merely *wrong* proof still comes back as `(false, nil)`.
+
+## Caveats
+
+:::warning[Parameter mismatches fail silently]
+`Verify` and `VerifyBatched` return `(false, nil)`. There is no descriptive error and no
+distinction between "the prover was dishonest" and "we disagree about the parameters". All of
+the following produce an indistinguishable `false`:
+
+- different `rangeDomain` or `ippDomain` between prover and verifier
+- different `maxVectorLength` (different generator counts, hence different trimmed vectors)
+- different `n`
+- different `g`, `h`, or `u`
+- a different merlin transcript label, or a transcript that was already consumed
+- a `capV` computed from a different `g`/`h` pair
+
+Pin all of these in one shared configuration value. Do not let two sides derive them
+independently.
+:::
+
+:::danger[n larger than the scalar's byte width panics]
+`getaL` reads bit `i` of the value as `vBytes[i>>3] >> (i & 0x07) & 0x01`, where `vBytes` is
+`v.Bytes()`. It performs no bounds check against `len(vBytes)`. With a 32-byte scalar
+encoding, any `n > 256` indexes past the end of the slice and panics with an index-out-of-range
+runtime error rather than returning an error. `NewRangeProver` will happily accept
+`maxVectorLength` above 256, so nothing stops you from reaching this. Keep `n <= 256` on the
+curves in this module.
+:::
+
+:::warning[Bit extraction assumes little-endian scalar bytes]
+`getaL` treats byte 0 of `Scalar.Bytes()` as holding the least significant bits. That is
+correct for Ed25519 scalars, which is the only curve any bulletproof test exercises. If a
+curve's `Scalar.Bytes()` is big-endian, the bit vector is reversed and the proof commits to a
+different number than `capV` does — verification fails, or worse, succeeds for the wrong
+range. Do not assume this package works on a curve until you have checked that curve's scalar
+byte order in [`core/curves`](/foundations/curves).
+:::
+
+:::note[Off-by-one in the input range check]
+`Prove` rejects `v < 0` and `v > 2^n`, so a value of exactly `2^n` passes the input check —
+but `2^n` is not representable in `n` bits, so `getaL` encodes it as `0` and the resulting
+proof does not match `capV`. The unexported `checkRange` helper (used by `BatchProve`) has
+the same `> 2^n` comparison despite a doc comment claiming it enforces `[0, 2^n - 1]`.
+Treat the usable range as `[0, 2^n)` and validate the boundary yourself. `checkRange` also
+does not reject negative values, unlike the inline check in `Prove`.
+:::
+
+:::note[Stale generator documentation]
+`getGeneratorPoints`' comment claims it returns `2·lenVector + 1` points "split between a
+single u generator and G and H lists". It returns `2·lenVector` points split evenly into `G`
+and `H`; there is no `u` generator in the output. `u` is always caller-supplied. Similarly
+`RangeProver.Prove`'s comment says the range is `[0, 2^n]`; the encoding makes it `[0, 2^n)`.
+:::
+
+:::info[isPowerOfTwo accepts zero]
+The helper is `i&(i-1) == 0`, which is true for `i == 0`. A zero-length vector therefore
+passes the power-of-two gate in `InnerProductProver.Prove` and fails later, or recurses
+oddly. Validate non-empty inputs before calling.
+:::
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Curves" href="/foundations/curves" icon="git-branch">
+    The `Curve`, `Point`, and `Scalar` types every signature here is generic over, plus the
+    scalar byte-order details the bit extraction depends on.
+  </Card>
+  <Card title="Schnorr proofs" href="/zero-knowledge/schnorr" icon="badge-check">
+    Far simpler and fully usable from outside its package. Prefer it whenever the statement is
+    just discrete-log knowledge.
+  </Card>
+</CardGroup>

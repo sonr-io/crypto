@@ -1,0 +1,516 @@
+---
+title: Threshold ECDSA
+description: DKLs18 2-of-2 threshold ECDSA — the protocol.Iterator API, serialization, key refresh, the low-level round methods, and the trusted-dealer shortcut.
+sidebar:
+  order: 4
+  icon: pen-tool
+---
+
+`tecdsa/dklsv1` is two-party ECDSA: Alice and Bob each hold a multiplicative share of the private
+key, and together they produce a signature that verifies under an ordinary ECDSA verifier. The
+package doc names the paper it wraps — [DKLs18](https://eprint.iacr.org/2018/499.pdf) — and the
+sub-packages cite specific protocols from it: DKG is "Protocol 2" page 7, signing is "Protocol 4"
+page 9, the OT extension is "Protocol 9".
+
+:::warning[2-of-2 only — there is no t-of-n mode]
+Every type in this package is named `Alice` or `Bob`. Both parties are required for every
+operation; there is no threshold parameter and no way to add a third party or tolerate one being
+offline. If you need t-of-n ECDSA, this package cannot provide it. If you need t-of-n Schnorr, see
+[Threshold Ed25519](/threshold/threshold-ed25519).
+:::
+
+The joint key is *multiplicative*: `pk = (sk_A · sk_B) · G`. That is why the protocol needs
+oblivious transfer — multiplying two secret shares without revealing them is the hard part, and
+[OT](/threshold/oblivious-transfer) is the machinery that does it.
+
+## Use the iterator API
+
+`tecdsa/dklsv1` exposes six constructors returning types that satisfy `protocol.Iterator`:
+
+```go
+type Iterator interface {
+	Next(input *Message) (*Message, error)
+	Result(version uint) (*Message, error)
+}
+```
+
+Each `Next` consumes the counterparty's last message and produces the next one, until it returns
+`protocol.ErrProtocolFinished`. Messages are `*protocol.Message` — a JSON-serialisable envelope of
+payload bytes, metadata, a protocol name, and a version — so your transport never needs to know
+what round it is on.
+
+<TypeTable
+  type={{
+    "NewAliceDkg(curve, version)": {
+      type: "*AliceDkg",
+      description: "DKG as Alice. Not an error return — construction cannot fail.",
+    },
+    "NewBobDkg(curve, version)": {
+      type: "*BobDkg",
+      description: "DKG as Bob. Bob moves first in DKG.",
+    },
+    "NewAliceSign(curve, hash, message, dkgResultMessage, version)": {
+      type: "(*AliceSign, error)",
+      description: "Signing as Alice. Needs Alice's encoded DKG (or refresh) result. Alice moves first in signing.",
+    },
+    "NewBobSign(curve, hash, message, dkgResultMessage, version)": {
+      type: "(*BobSign, error)",
+      description: "Signing as Bob. Bob is the party that ends up with the signature.",
+    },
+    "NewAliceRefresh(curve, dkgResultMessage, version)": {
+      type: "(*AliceRefresh, error)",
+      description: "Key refresh as Alice. Alice moves first.",
+    },
+    "NewBobRefresh(curve, dkgResultMessage, version)": {
+      type: "(*BobRefresh, error)",
+      description: "Key refresh as Bob.",
+    },
+  }}
+/>
+
+### The crank loop
+
+Both parties advance in lockstep, each `Next` handing its output to the other. This is the harness
+the package's own tests use:
+
+```go signing.go
+import (
+	"github.com/sonr-io/crypto/core/protocol"
+)
+
+// runIteratedProtocol cranks two parties alternately until both report
+// ErrProtocolFinished. firstParty is whichever side moves first.
+func runIteratedProtocol(firstParty, secondParty protocol.Iterator) (error, error) {
+	var (
+		message    *protocol.Message
+		firstErr   error
+		secondErr  error
+	)
+
+	for firstErr != protocol.ErrProtocolFinished || secondErr != protocol.ErrProtocolFinished {
+		message, firstErr = firstParty.Next(message)
+		if firstErr != nil && firstErr != protocol.ErrProtocolFinished {
+			return nil, firstErr
+		}
+
+		message, secondErr = secondParty.Next(message)
+		if secondErr != nil && secondErr != protocol.ErrProtocolFinished {
+			return secondErr, nil
+		}
+	}
+	return firstErr, secondErr
+}
+```
+
+The first `Next` is called with a `nil` message — that is how the mover-first party starts.
+
+:::warning[Who moves first differs per operation]
+**DKG: Bob first. Signing: Alice first. Refresh: Alice first.** Getting this backwards does not
+produce a clean error; it produces a decode failure on a message the party was not expecting. The
+comment in the package's test file states the rule verbatim: *"For DKG bob starts first. For refresh
+and sign, Alice starts first."*
+:::
+
+### DKG
+
+```go
+import (
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/core/protocol"
+	"github.com/sonr-io/crypto/tecdsa/dklsv1"
+)
+
+func runDkg() (*protocol.Message, *protocol.Message, error) {
+	curve := curves.K256()
+
+	alice := dklsv1.NewAliceDkg(curve, protocol.Version1)
+	bob := dklsv1.NewBobDkg(curve, protocol.Version1)
+
+	// Bob moves first in DKG.
+	aliceErr, bobErr := runIteratedProtocol(bob, alice)
+	if aliceErr != protocol.ErrProtocolFinished || bobErr != protocol.ErrProtocolFinished {
+		return nil, nil, fmt.Errorf("dkg did not complete: alice=%v bob=%v", aliceErr, bobErr)
+	}
+
+	// Both sides now agree on the public key:
+	//   alice.Output().PublicKey.Equal(bob.Output().PublicKey) == true
+
+	aliceResult, err := alice.Result(protocol.Version1)
+	if err != nil {
+		return nil, nil, err
+	}
+	bobResult, err := bob.Result(protocol.Version1)
+	if err != nil {
+		return nil, nil, err
+	}
+	return aliceResult, bobResult, nil
+}
+```
+
+`Result` returns the party's *own* state, encoded, ready to be persisted and later fed to
+`NewAliceSign` / `NewBobSign`. Alice's result contains her `SecretKeyShare` and her seed-OT
+receiver output; Bob's contains his share and his seed-OT sender output. Both contain the shared
+`PublicKey`.
+
+<TypeTable
+  type={{
+    PublicKey: {
+      type: "curves.Point",
+      required: true,
+      description: "The joint public key. Public; identical for Alice and Bob.",
+    },
+    SecretKeyShare: {
+      type: "curves.Scalar",
+      required: true,
+      description: "This party's multiplicative share. Secret. Lose it and the key is unrecoverable.",
+    },
+    SeedOtResult: {
+      type: "*simplest.ReceiverOutput | *simplest.SenderOutput",
+      required: true,
+      description: "Seed OT output — ReceiverOutput for Alice, SenderOutput for Bob. Secret, but replaceable by re-running OT (which is what refresh does).",
+    },
+  }}
+/>
+
+### Signing
+
+```go
+import "golang.org/x/crypto/sha3"
+
+func runSign(curve *curves.Curve, aliceDkg, bobDkg *protocol.Message) (*curves.EcdsaSignature, error) {
+	msg := []byte("As soon as you trust yourself, you will know how to live.")
+
+	aliceSign, err := dklsv1.NewAliceSign(curve, sha3.New256(), msg, aliceDkg, protocol.Version1)
+	if err != nil {
+		return nil, err
+	}
+	bobSign, err := dklsv1.NewBobSign(curve, sha3.New256(), msg, bobDkg, protocol.Version1)
+	if err != nil {
+		return nil, err
+	}
+
+	// Alice moves first in signing.
+	aliceErr, bobErr := runIteratedProtocol(aliceSign, bobSign)
+	if aliceErr != protocol.ErrProtocolFinished || bobErr != protocol.ErrProtocolFinished {
+		return nil, fmt.Errorf("sign did not complete")
+	}
+
+	// Only Bob obtains the signature.
+	resultMessage, err := bobSign.Result(protocol.Version1)
+	if err != nil {
+		return nil, err
+	}
+	return dklsv1.DecodeSignature(resultMessage)
+}
+```
+
+:::note[Only Bob gets the signature]
+`AliceSign.Result` is documented as *always* returning an error: "Alice does not compute a
+signature in the DKLS protocol; only Bob computes the signature." Whichever peer needs the output
+must play Bob. Bob also verifies the signature himself before returning it.
+:::
+
+The result is a `*curves.EcdsaSignature` and verifies under `curves.VerifyEcdsa` — and under any
+standard ECDSA verifier — against the joint public key. The `hash hash.Hash` argument is the digest
+function; both parties must pass the same one, and both must pass the same `message`.
+
+### Key refresh
+
+Refresh re-randomises both shares while leaving the public key untouched. The `refresh` package doc
+describes the mechanism: Alice draws `k_A`, Bob draws `k_B`, the two are combined through a Merlin
+transcript into a single `k`, Bob sets `sk_B *= k` and Alice sets `sk_A *= k^{-1}`. Since
+`sk_A · sk_B` is unchanged, so is `pk`. Then the seed OT is redone from scratch.
+
+```go
+func runRefresh(curve *curves.Curve, aliceDkg, bobDkg *protocol.Message) (*protocol.Message, *protocol.Message, error) {
+	aliceRefresh, err := dklsv1.NewAliceRefresh(curve, aliceDkg, protocol.Version1)
+	if err != nil {
+		return nil, nil, err
+	}
+	bobRefresh, err := dklsv1.NewBobRefresh(curve, bobDkg, protocol.Version1)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Alice moves first in refresh.
+	aliceErr, bobErr := runIteratedProtocol(aliceRefresh, bobRefresh)
+	if aliceErr != protocol.ErrProtocolFinished || bobErr != protocol.ErrProtocolFinished {
+		return nil, nil, fmt.Errorf("refresh did not complete")
+	}
+
+	aliceOut, err := aliceRefresh.Result(protocol.Version1)
+	if err != nil {
+		return nil, nil, err
+	}
+	bobOut, err := bobRefresh.Result(protocol.Version1)
+	if err != nil {
+		return nil, nil, err
+	}
+	// These messages substitute for the DKG results in NewAliceSign / NewBobSign.
+	return aliceOut, bobOut, nil
+}
+```
+
+The refresh outputs are the same `*dkg.AliceOutput` / `*dkg.BobOutput` shapes as DKG, so they drop
+straight into the signing constructors.
+
+:::tip[Why refresh matters]
+Refresh defeats a *mobile adversary* — one that compromises Alice this month and Bob next month. If
+shares never change, the two stolen halves reconstruct the key. After a refresh, an old share is
+useless with a new one. Refresh also replaces the seed OT material, so it recovers from OT state
+disclosure. It does **not** rotate the public key, so on-chain addresses and DID documents stay
+valid.
+:::
+
+:::warning[Refresh is not exercised by this repository's tests]
+In `tecdsa/dklsv1/protocol_test.go` the iterator-level refresh coverage — `TestRefreshProto`, the
+`refreshV1` helper, `TestSignColdStart`, and `TestEncodeDecode` — is entirely commented out. Only
+`TestDkgProto` and `TestDkgSignProto` actually run. The lower-level `tecdsa/dklsv1/refresh` package
+does have live tests (`Test_RefreshLeadsToTheSamePublicKeyButDifferentPrivateMaterial`,
+`Test_RefreshOTIsCorrect`, `Test_CanSignAfterRefresh`), so the protocol logic is covered; it is the
+iterator wrappers, their serializers, and cold-start decoding that are not. Validate the round-trip
+in your own environment before relying on it.
+:::
+
+## Serialization
+
+Every helper takes or returns a `*protocol.Message`, which marshals to JSON.
+
+| Direction | Alice | Bob |
+| --- | --- | --- |
+| DKG encode | `EncodeAliceDkgOutput(*dkg.AliceOutput, version)` | `EncodeBobDkgOutput(*dkg.BobOutput, version)` |
+| DKG decode | `DecodeAliceDkgResult(*protocol.Message)` | `DecodeBobDkgResult(*protocol.Message)` |
+| Refresh encode | `EncodeAliceRefreshOutput(*dkg.AliceOutput, version)` | `EncodeBobRefreshOutput(*dkg.BobOutput, version)` |
+| Refresh decode | `DecodeAliceRefreshResult(*protocol.Message)` | `DecodeBobRefreshResult(*protocol.Message)` |
+| Signature decode | — | `DecodeSignature(*protocol.Message)` |
+
+Refresh outputs use the *same* `dkg.AliceOutput` / `dkg.BobOutput` structs as DKG; only the
+protocol tag on the message differs (`protocol.Dkls18Refresh` versus `protocol.Dkls18Dkg`).
+
+```go
+import "encoding/json"
+
+// Persist Alice's DKG state.
+msg, err := dklsv1.EncodeAliceDkgOutput(aliceDkg.Output(), protocol.Version1)
+if err != nil {
+	return err
+}
+blob, err := json.Marshal(msg)
+// ... store blob ...
+
+// Restore it later.
+restored := &protocol.Message{}
+if err := json.Unmarshal(blob, restored); err != nil {
+	return err
+}
+aliceOutput, err := dklsv1.DecodeAliceDkgResult(restored)
+```
+
+`protocol.EncodeMessage` / `protocol.DecodeMessage` are also available and produce a
+base64-of-JSON string if you want a single opaque token instead of a JSON object.
+
+:::danger[The encoded output is the private key share]
+`EncodeAliceDkgOutput` and its siblings serialise `SecretKeyShare` and the seed-OT material in the
+clear. The resulting bytes are as sensitive as a raw private key half. Encrypt them at rest — see
+[AEAD](/symmetric/aead) — and never log or transmit them unprotected.
+:::
+
+### The `version` argument
+
+`version uint` selects the serialization format. `core/protocol` defines exactly two constants, and
+they are not the numbers you would guess:
+
+```go
+// versions will increment in 100 intervals, to leave room for adding other versions in between them if it is
+// ever needed in the future.
+
+// Version0 is version 0!
+Version0 = 100
+
+// Version1 is version 2!
+Version1 = 200
+```
+
+Pass `protocol.Version1` (`200`). It is what every live test uses, and the only value the current
+serializers are exercised with. The `// Version1 is version 2!` comment is in the source as
+written — treat these as opaque tokens and never hardcode the integers.
+
+## The low-level round API
+
+Underneath the iterators sit explicit round methods. Use them only when writing your own transport
+or auditing; they are the mechanism, not the interface.
+
+:::note[The numbers interleave the two parties]
+`Round1` … `Round10` are a *single* global sequence across Alice and Bob, not per-party sequences.
+Alice owns the even-numbered DKG rounds, Bob the odd ones, and neither type has all ten methods.
+The names also carry the mapping down into the seed OT — `Round6DkgRound2Ot` means "global round 6,
+which is round 2 of the embedded OT".
+:::
+
+### `tecdsa/dklsv1/dkg` — 10 rounds
+
+```go
+import "github.com/sonr-io/crypto/tecdsa/dklsv1/dkg"
+
+alice := dkg.NewAlice(curve)
+bob := dkg.NewBob(curve)
+
+seed, err := bob.Round1GenerateRandomSeed()
+round2Output, err := alice.Round2CommitToProof(seed)
+proof, err := bob.Round3SchnorrProve(round2Output)
+proof, err = alice.Round4VerifyAndReveal(proof)
+proof, err = bob.Round5DecommitmentAndStartOt(proof)
+compressedReceiversMaskedChoice, err := alice.Round6DkgRound2Ot(proof)
+challenge, err := bob.Round7DkgRound3Ot(compressedReceiversMaskedChoice)
+challengeResponse, err := alice.Round8DkgRound4Ot(challenge)
+challengeOpenings, err := bob.Round9DkgRound5Ot(challengeResponse)
+err = alice.Round10DkgRound6Ot(challengeOpenings)
+
+// Only valid after round 10.
+aliceOutput := alice.Output()
+bobOutput := bob.Output()
+```
+
+Rounds 1–5 establish the joint public key with Schnorr proofs of knowledge of each share. Rounds
+6–10 are the seed OT — `simplest`'s six rounds, driven through thin wrappers. Round 1 exists to
+build a session identifier from 32 random bytes contributed by each side; the method's own doc
+comment notes this is not in the paper and is "secure if either party is honest".
+
+:::warning[Output before round 10 is undefined behaviour]
+Both `Alice.Output()` and `Bob.Output()` are documented as "Must be called after step 9. Calling it
+before that step has undefined behaviour." They do not return an error and do not check state.
+:::
+
+### `tecdsa/dklsv1/sign` — 4 rounds
+
+```go
+import "github.com/sonr-io/crypto/tecdsa/dklsv1/sign"
+
+alice := sign.NewAlice(curve, sha3.New256(), aliceDkgOutput)
+bob := sign.NewBob(curve, sha3.New256(), bobDkgOutput)
+
+message := []byte("A message.")
+seed, err := alice.Round1GenerateRandomSeed()
+round2Output, err := bob.Round2Initialize(seed)
+round3Output, err := alice.Round3Sign(message, round2Output)
+err = bob.Round4Final(message, round3Output)
+
+signature := bob.Signature // *curves.EcdsaSignature
+```
+
+Four rounds, and Bob's `Signature` field is populated by `Round4Final` — which also verifies it.
+Note the role reversal versus DKG: Alice contributes the seed here, Bob initialises.
+
+The multiplication sub-protocol ("protocol 5 of the paper") is exposed separately as
+`sign.MultiplySender` and `sign.MultiplyReceiver`, constructed with
+`NewMultiplySender(seedOtResults *simplest.ReceiverOutput, curve, uniqueSessionId)` and
+`NewMultiplyReceiver(seedOtResults *simplest.SenderOutput, curve, uniqueSessionId)`. Note the
+crossed roles, which the constructor docs flag explicitly: the multiplication sender consumes the
+seed-OT *receiver's* output, and the multiplication receiver consumes the seed-OT *sender's*.
+
+:::note[A copy-pasted doc comment in the source]
+`MultiplyReceiver`'s type comment reads "MultiplyReceiver is the party that plays the role of
+Sender in the multiplication protocol" — identical to `MultiplySender`'s. It is a stale comment,
+not a behavioural claim; the constructor comments are the accurate ones.
+:::
+
+### `tecdsa/dklsv1/refresh` — 7 rounds
+
+```go
+import "github.com/sonr-io/crypto/tecdsa/dklsv1/refresh"
+
+alice := refresh.NewAlice(curve, aliceDkgOutput)
+bob := refresh.NewBob(curve, bobDkgOutput)
+
+round1Output := alice.Round1RefreshGenerateSeed() // no error return
+round2Output, err := bob.Round2RefreshProduceSeedAndMultiplyAndStartOT(round1Output)
+round3Output, err := alice.Round3RefreshMultiplyRound2Ot(round2Output)
+round4Output, err := bob.Round4RefreshRound3Ot(round3Output)
+round5Output, err := alice.Round5RefreshRound4Ot(round4Output)
+round6Output, err := bob.Round6RefreshRound5Ot(round5Output)
+err = alice.Round7DkgRound6Ot(round6Output)
+
+newAliceOutput := alice.Output()
+newBobOutput := bob.Output()
+```
+
+Rounds 1–2 do the share re-randomisation; 2–7 redo the seed OT. `Round1RefreshGenerateSeed` is the
+only round method in the whole package with no error return.
+
+## Trusted dealer
+
+`tecdsa/dklsv1/dealer.GenerateAndDeal(curve)` produces `(*dkg.AliceOutput, *dkg.BobOutput, error)`
+in one call, with no interaction. The outputs are shape-identical to DKG's and drop straight into
+`sign.NewAlice` / `sign.NewBob`.
+
+```go
+import "github.com/sonr-io/crypto/tecdsa/dklsv1/dealer"
+
+aliceOutput, bobOutput, err := dealer.GenerateAndDeal(curves.K256())
+if err != nil {
+	return err
+}
+
+alice := sign.NewAlice(curves.K256(), sha3.New256(), aliceOutput)
+bob := sign.NewBob(curves.K256(), sha3.New256(), bobOutput)
+// ... four signing rounds as above ...
+```
+
+:::danger[The dealer defeats the entire point of threshold ECDSA]
+`GenerateAndDeal` samples `sk_A` and `sk_B` in a single process, multiplies them to build the
+public key, and fabricates a matching pair of seed-OT outputs locally. For the duration of that
+call, one machine holds material equivalent to the full private key. Anything that reads that
+process's memory — a core dump, a swap page, a compromised host, a hypervisor — gets the key.
+
+The package's own doc comments say it twice, in capitals: *"Note that running actual DKG is ALWAYS
+recommended over a trusted dealer"*, and *"this function breaks the security guarantees of DKG.
+only use this function if you have a very good reason to."*
+
+Legitimate uses: unit tests, and migrating a key you already hold in one place into 2-of-2 shares.
+For that second case, follow the deal immediately with a key refresh (see above) so the shares in
+long-term storage were never both resident in the dealing process's memory.
+:::
+
+## Caveats
+
+:::warning[Curve support is narrow]
+Every live test runs on `curves.K256()` and `curves.P256()` only. Other curves in
+[`core/curves`](/foundations/curves) are not exercised by this package.
+:::
+
+:::warning[Both parties must agree on message and hash out of band]
+`NewAliceSign` and `NewBobSign` each take their own `message` and `hash`. Nothing in the protocol
+messages forces them to match. If they disagree, signing either fails at Bob's verification step or
+— worse — you get a signature over a message one party never approved. Bind the message to your
+session at the application layer.
+:::
+
+:::note[State is single-use and mutable]
+Each `AliceDkg`/`BobSign`/etc. value tracks a step index and mutates on every `Next`. One value
+serves one protocol execution in one goroutine. Reusing a completed iterator, or sharing one across
+goroutines, is unsupported.
+:::
+
+:::note[No audit claim]
+This is a port of Coinbase's Kryptology `dklsv1`. Nothing in this repository establishes that the
+port, its serializers, or the surrounding wrappers have been reviewed or verified. See
+[Security Notes](/reference/security).
+:::
+
+## Next
+
+<CardGroup cols={2}>
+<Card title="MPC Enclave" href="/identity/mpc-enclave" icon="lock">
+The wrapper over this package that application code should actually call — key import/export,
+signing, and persistence without touching rounds.
+</Card>
+<Card title="Oblivious Transfer" href="/threshold/oblivious-transfer" icon="shuffle">
+The seed OT and cOT extension that rounds 6–10 are driving.
+</Card>
+<Card title="ECDSA" href="/signatures/ecdsa" icon="pen-tool">
+Single-party ECDSA, and the verifier this package's output satisfies.
+</Card>
+<Card title="Distributed Key Generation" href="/threshold/dkg" icon="git-branch">
+The other DKG protocols in the repository — none of which feed this one.
+</Card>
+</CardGroup>

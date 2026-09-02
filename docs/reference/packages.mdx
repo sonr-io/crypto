@@ -1,0 +1,109 @@
+---
+title: Package index
+description: Every importable package in github.com/sonr-io/crypto, what it provides, and the page that documents it.
+sidebar:
+  label: Package index
+  order: 1
+  icon: list
+---
+
+The module exposes 61 Go packages. This is the complete map from import path to documentation.
+Import paths below are relative to `github.com/sonr-io/crypto`.
+
+## Foundations
+
+| Package | Provides | Docs |
+| --- | --- | --- |
+| `core` | Modular arithmetic, hash-to-field, HMAC commitments, safe primes | [Arithmetic](/foundations/arithmetic) |
+| `core/curves` | `Curve` / `Point` / `Scalar` abstraction and every named curve | [Curves](/foundations/curves) |
+| `core/curves/secp256k1` | Vendored Jacobian secp256k1 `BitCurve` | [Curves](/foundations/curves) |
+| `core/protocol` | `Iterator`, `Message`, protocol name and version constants | [Protocol messages](/foundations/protocol) |
+| `core/curves/native` | Montgomery field and elliptic-point machinery, hash-to-curve hashers | [Curves](/foundations/curves) |
+| `core/curves/native/bls12381` | BLS12-381 `G1`/`G2`/`Gt` and pairing engine | [Curves](/foundations/curves) |
+| `core/curves/native/k256` + `k256/fp`, `k256/fq` | secp256k1 base and scalar field arithmetic | [Curves](/foundations/curves) |
+| `core/curves/native/p256` + `p256/fp`, `p256/fq` | NIST P-256 base and scalar field arithmetic | [Curves](/foundations/curves) |
+| `core/curves/native/pasta` + `pasta/fp`, `pasta/fq` | Pasta (Pallas) field arithmetic | [Curves](/foundations/curves) |
+
+## Symmetric, KDF, and secret hygiene
+
+| Package | Provides | Docs |
+| --- | --- | --- |
+| `aead` | AES-256-GCM with nonce management | [AEAD](/symmetric/aead) |
+| `daed` | AES-SIV-CMAC deterministic AEAD (RFC 5297) | [Deterministic AEAD](/symmetric/deterministic-aead) |
+| `argon2` | Argon2id password hashing and key derivation | [Key derivation](/symmetric/key-derivation) |
+| `subtle` | HKDF, X25519, hash and curve name helpers | [Key derivation](/symmetric/key-derivation) |
+| `subtle/random` | Random byte and uint32 generation | [Secrets](/symmetric/secrets) |
+| `salt` | Salt value type and in-memory salt store | [Secrets](/symmetric/secrets) |
+| `password` | Password policy validation and entropy estimation | [Secrets](/symmetric/secrets) |
+| `secure` | Memory zeroing, secure byte/string/buffer wrappers | [Secrets](/symmetric/secrets) |
+
+## Signatures
+
+| Package | Provides | Docs |
+| --- | --- | --- |
+| `signatures/bls/bls_sig` | BLS signatures: Basic, Aug, and PoP ciphersuites, aggregation, threshold keygen | [BLS](/signatures/bls) |
+| `signatures/bbs` | BBS+ signatures with selective disclosure and blind signing | [BBS+](/signatures/bbs) |
+| `signatures/common` | Shared proof messages, commitment builder, HMAC-DRBG | [Signatures](/signatures) |
+| `signatures/schnorr/mina` | Mina-protocol Schnorr over Pallas with Poseidon | [Chain schemes](/signatures/chain-schemes) |
+| `signatures/schnorr/nem` | NEM Ed25519-Keccak signatures | [Chain schemes](/signatures/chain-schemes) |
+| `ecdsa` | Low-S canonicalization and RFC 6979 deterministic signing | [ECDSA](/signatures/ecdsa) |
+| `vrf` | Verifiable random function over Edwards25519 | [VRF](/signatures/vrf) |
+
+## Threshold cryptography and MPC
+
+| Package | Provides | Docs |
+| --- | --- | --- |
+| `sharing` | Shamir, Feldman, and Pedersen secret sharing | [Secret sharing](/threshold/secret-sharing) |
+| `sharing/v1` | Legacy field-based sharing over `EcPoint`/`Element` | [Secret sharing](/threshold/secret-sharing) |
+| `dkg/frost` | FROST distributed key generation, two rounds | [DKG](/threshold/dkg) |
+| `dkg/gennaro` | Gennaro DKG, four rounds | [DKG](/threshold/dkg) |
+| `dkg/gennaro2p` | Two-party Gennaro DKG façade | [DKG](/threshold/dkg) |
+| `tecdsa/dklsv1` | Two-party threshold ECDSA as protocol iterators | [Threshold ECDSA](/threshold/threshold-ecdsa) |
+| `tecdsa/dklsv1/dkg` | The underlying 10-round DKG rounds | [Threshold ECDSA](/threshold/threshold-ecdsa) |
+| `tecdsa/dklsv1/sign` | The underlying signing rounds and two-party multiplication | [Threshold ECDSA](/threshold/threshold-ecdsa) |
+| `tecdsa/dklsv1/refresh` | Share refresh rounds | [Threshold ECDSA](/threshold/threshold-ecdsa) |
+| `tecdsa/dklsv1/dealer` | Trusted-dealer key generation shortcut | [Threshold ECDSA](/threshold/threshold-ecdsa) |
+| `ted25519/ted25519` | Threshold Ed25519 producing standard signatures | [Threshold Ed25519](/threshold/threshold-ed25519) |
+| `ted25519/frost` | FROST threshold Schnorr signing, three rounds | [Threshold Ed25519](/threshold/threshold-ed25519) |
+| `ot/base/simplest` | Verified base (seed) oblivious transfer | [Oblivious transfer](/threshold/oblivious-transfer) |
+| `ot/extension/kos` | KOS correlated OT extension | [Oblivious transfer](/threshold/oblivious-transfer) |
+| `ot/ottest` | Test harness wiring both OT sides | [Oblivious transfer](/threshold/oblivious-transfer) |
+
+## Zero-knowledge and homomorphic encryption
+
+| Package | Provides | Docs |
+| --- | --- | --- |
+| `zkp/schnorr` | Non-interactive proof of knowledge of a discrete log | [Schnorr proofs](/zero-knowledge/schnorr) |
+| `accumulator` | Pairing-based accumulator with membership proofs | [Accumulator](/zero-knowledge/accumulator) |
+| `bulletproof` | Inner-product argument and range proofs, batched | [Bulletproofs](/zero-knowledge/bulletproof) |
+| `paillier` | Additively homomorphic encryption and the PSF proof | [Paillier](/zero-knowledge/paillier) |
+
+## Identity and authorization
+
+| Package | Provides | Docs |
+| --- | --- | --- |
+| `keys` | `did:key` encoding, multicodec key types, public key verification | [did:key](/identity/did-key) |
+| `keys/parsers` | Chain-specific key parsing — **largely unimplemented** | [did:key](/identity/did-key) |
+| `mpc` | Threshold ECDSA enclave: keygen, sign, verify, refresh, import/export | [MPC enclave](/identity/mpc-enclave) |
+| `mpc/spec` | Duplicate UCAN-over-MPC surface — **prefer `ucan`** | [MPC enclave](/identity/mpc-enclave) |
+| `ucan` | UCAN capability tokens, attenuation, verification | [UCAN](/identity/ucan) |
+| `ecies` | ECIES payload encryption over secp256k1 | [ECIES](/identity/ecies) |
+| `wasm` | Ed25519 module signing and SHA-256 hash pinning | [WASM modules](/identity/wasm-modules) |
+
+## Not importable or not wired in
+
+| Package | Status |
+| --- | --- |
+| `internal`, `internal/ed25519/edwards25519`, `internal/ed25519/extra25519` | Go `internal/` visibility — usable only inside this module. Documented for orientation in [Arithmetic](/foundations/arithmetic). |
+| `signatures/bls/tests/bls` | A `main` package used for BLS test-vector generation, not a library. |
+| `empty-module` | A separate module containing a `go-bip39` stub whose functions error or panic. It is referenced by neither `go.mod` nor a workspace file. See [security notes](/reference/security). |
+
+:::tip
+`go doc` is the fastest way to check a signature against the version you have vendored:
+
+```bash
+go doc github.com/sonr-io/crypto/sharing
+go doc -all github.com/sonr-io/crypto/accumulator
+go doc github.com/sonr-io/crypto/core/curves.Point
+```
+:::

@@ -1,0 +1,244 @@
+---
+title: Verifiable Random Function
+description: A bespoke VRF over Edwards25519 using SHAKE256 and the Elligator map — unpredictable outputs that anyone holding the public key can verify.
+sidebar:
+  order: 5
+  icon: dice-5
+---
+
+A verifiable random function is a keyed hash with a proof. Given a secret key and an input message,
+it produces an output that looks uniformly random to anyone without the key, yet is **uniquely
+determined** by the key and message, and comes with a proof that lets anyone holding the public key
+confirm the output is the right one. It is the primitive you want whenever a system needs randomness
+that participants cannot grind and cannot dispute.
+
+```go
+import "github.com/sonr-io/crypto/vrf"
+```
+
+## When to use one
+
+- **Leader election.** Each validator computes `VRF_sk(round_seed)`. Whoever's output falls below a
+  threshold is the leader, and can prove it. Nobody can pre-compute another validator's output, and
+  nobody can retry with a different key without publishing that key.
+- **Verifiable lotteries.** Draw a winner from a beacon value; the operator proves the draw was
+  honest without revealing the key.
+- **Private lookup keys.** In a key-transparency directory (this construction's origin), the map
+  index for a username is `VRF_sk(username)`, so the directory can prove a name's absence without
+  its tree structure leaking the set of registered names to an enumerating client.
+
+Do **not** reach for a VRF where a plain signature would do — this package offers no way to sign
+arbitrary data, and verification only ever answers "is this the correct output for this message".
+And do not treat the output as a commitment: it is a deterministic function of the message, so once
+a proof is published anyone holding the public key can confirm a *guess* at the message by
+re-verifying against it. A VRF hides the output from people without the key; it does not hide the
+input from people who can guess it.
+
+## The construction
+
+The package doc comment states the scheme exactly. `E` is Curve25519 in Edwards coordinates, `h` is
+SHA-3 (specifically SHAKE256 throughout the implementation), `f` is the Elligator map, and `8` is the
+cofactor:
+
+$$
+H(n) = f(h(n))^8, \qquad \mathrm{VRF}_x(n) = h\!\left(n,\, H(n)^x\right)
+$$
+
+The proof is a Chaum–Pedersen style sigma protocol made non-interactive, proving that the same
+secret `x` relates `g → g^x` and `H(n) → H(n)^x`:
+
+$$
+\mathrm{Prove}_x(n) = \bigl(c,\; t = r - c\cdot x,\; \mathit{ii} = H(n)^x\bigr)
+$$
+
+with `r = h(x, n)` supplying the proof's randomness — so proving, like computing, is fully
+deterministic. Verification recomputes the challenge from `g^t · P^c` and `H(n)^t · ii^c` and checks
+it equals the challenge carried in the proof, and separately checks that the claimed output equals
+`h(n, ii)`.
+
+Concretely, in `vrf.go`: `hashToCurve` runs `sha3.ShakeSum256` over the message, maps the digest with
+`extra25519.HashToEdwards`, then applies three successive `GeDouble` calls — multiplication by the
+cofactor 8 — to land in the prime-order subgroup. The challenge is
+`SHAKE256(g ‖ H(n) ‖ pk ‖ H(n)^x ‖ g^r ‖ H(n)^r ‖ n)` reduced mod the group order. In the code the
+challenge scalar is named `s`, which is why the proof layout below reads `s ‖ t ‖ ii` rather than
+`c ‖ t ‖ ii`.
+
+## Sizes and constants
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `PublicKeySize` | `32` | Compressed Edwards point |
+| `PrivateKeySize` | `64` | 32-byte seed followed by the 32-byte public key |
+| `Size` | `32` | The VRF output |
+| `ProofSize` | `96` | `s ‖ t ‖ H(n)^x`, three 32-byte values |
+
+`ErrGetPubKey` is the package's only exported error value; it is declared but never returned by any
+exported function in `vrf.go` — `Public()` signals failure through its boolean instead.
+
+## API
+
+<TypeTable
+  type={{
+    "GenerateKey(rnd io.Reader)": {
+      type: "(PrivateKey, error)",
+      description: "Reads 32 bytes of seed from rnd (crypto/rand when nil), expands it, and writes the derived public key into bytes 32..63. Returns a 64-byte PrivateKey.",
+    },
+    "PrivateKey.Public()": {
+      type: "(PublicKey, bool)",
+      description: "Returns the trailing 32 bytes of the private key. The bool reports whether the internal type assertion succeeded; in practice it is always true for a well-formed key.",
+    },
+    "PrivateKey.Compute(m []byte)": {
+      type: "[]byte",
+      description: "The 32-byte VRF output alone. One scalar multiplication plus a hash. No error return — a malformed key produces garbage rather than a failure.",
+    },
+    "PrivateKey.Prove(m []byte)": {
+      type: "(vrf, proof []byte)",
+      description: "The same 32-byte output plus a 96-byte proof. Roughly three scalar multiplications. Deterministic — no reader, no nonce.",
+    },
+    "PublicKey.Verify(m, vrfBytes, proof []byte)": {
+      type: "bool",
+      description: "Checks the output against the proof under this public key. Returns false on any length mismatch, any bad point encoding, and any check failure. No error channel.",
+    },
+  }}
+/>
+
+`Compute` and `Prove` return **the same output** for the same key and message — `Prove` just also
+gives you the evidence. Use `Compute` when the holder needs the value locally (deciding whether it
+even won a leader election, indexing its own directory) and `Prove` only when the value must be
+published. That distinction is the main performance lever in the package: skipping the proof avoids
+two of the three scalar multiplications.
+
+## Example
+
+Grounded in `TestHonestComplete` and `TestConvertPrivateKeyToPublicKey`.
+
+```go vrf.go
+package main
+
+import (
+	"bytes"
+	"fmt"
+	"log"
+
+	"github.com/sonr-io/crypto/vrf"
+)
+
+func main() {
+	// nil reader means crypto/rand.
+	sk, err := vrf.GenerateKey(nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	pk, ok := sk.Public()
+	if !ok {
+		log.Fatal(vrf.ErrGetPubKey)
+	}
+
+	round := []byte("epoch-4711")
+
+	// Cheap path: the holder just wants the value.
+	out := sk.Compute(round)
+
+	// Publishing path: the value plus evidence.
+	outFromProof, proof := sk.Prove(round)
+
+	fmt.Println("Compute == Prove:", bytes.Equal(out, outFromProof)) // true
+	fmt.Println("output bytes:", len(out), "proof bytes:", len(proof)) // 32 96
+
+	// Anyone with pk can check it.
+	fmt.Println("verified:", pk.Verify(round, outFromProof, proof)) // true
+
+	// Any single flipped bit in the proof fails the check.
+	tampered := append([]byte(nil), proof...)
+	tampered[0] ^= 0x01
+	fmt.Println("tampered verified:", pk.Verify(round, outFromProof, tampered)) // false
+}
+```
+
+`TestFlipBitForgery` in the package flips bits across the proof and asserts every variant fails.
+
+## Properties a caller can rely on
+
+| Property | What it means here |
+| --- | --- |
+| **Uniqueness** | For a fixed key and message there is exactly one output that will verify. A prover cannot shop for a favourable value. This is what a plain signature cannot give you. |
+| **Pseudorandomness** | Without the secret key, the output is indistinguishable from a uniform 32-byte string, so future outputs cannot be predicted from past ones. |
+| **Public verifiability** | Anyone with the 32-byte public key can check an output against its proof — no interaction with the prover, no shared secret. |
+| **Determinism** | Both `Compute` and `Prove` derive all internal randomness from the key and message, so there is no RNG at evaluation time and nothing to fail open. |
+
+## Caveats
+
+:::danger[This is a bespoke construction with no standards claim]
+The package doc names no RFC and no paper. It is **not** RFC 9381 (`draft-irtf-cfrg-vrf`) — that
+standard specifies SHA-512 with `try-and-increment` or `hash_to_curve` for `ECVRF-EDWARDS25519-SHA512-*`
+ciphersuites, and a differently structured proof and encoding. This package uses SHAKE256 throughout
+and the Elligator map, and packs the proof as `s ‖ t ‖ ii`.
+
+The design matches the VRF shipped with the CONIKS key-transparency work, but nothing in this
+repository asserts conformance to any published specification, and there are no cross-implementation
+test vectors — `vrf_test.go` contains three self-consistency tests and four benchmarks, nothing more.
+**Assume zero interoperability** with any other VRF implementation. If your protocol requires a
+counterparty running different software to verify these proofs, this package is the wrong choice.
+:::
+
+:::danger[The 64-byte key is not an Ed25519 key, despite looking like one]
+`PrivateKey` is `[]byte` with the same 64-byte seed-then-public-key layout as
+`crypto/ed25519.PrivateKey`, and `Public()` is implemented by converting to
+`golang.org/x/crypto/ed25519.PrivateKey` and calling through. But `GenerateKey` derives the scalar by
+expanding the seed with **SHAKE256**, where Ed25519 uses SHA-512. The public key written into bytes
+32..63 therefore corresponds to a *different* scalar than standard Ed25519 would derive from the same
+seed.
+
+Measured against this repository, for one generated key:
+
+```
+ed25519.Sign with the vrf key, verified under its own embedded pubkey: false
+ed25519.NewKeyFromSeed(sk[:32]) derives the same public key:           false
+```
+
+The types will not stop you — both are `[]byte` with identical lengths. Never share a seed, a key,
+or a signature between `vrf` and `crypto/ed25519`.
+:::
+
+:::warning[No error channel anywhere on the hot path]
+`Compute` returns only `[]byte`; `Prove` returns only two slices; `Verify` returns only `bool`. A
+truncated key, a wrong-length public key, or a corrupted proof all surface as `false` or as silently
+wrong bytes. `Compute` in particular does no validation at all — calling it on a short or zero
+`PrivateKey` will panic or return meaningless output rather than report anything. Validate lengths
+against `PrivateKeySize` and `PublicKeySize` at your trust boundary.
+:::
+
+:::warning[Vendored curve code]
+The implementation depends on `internal/ed25519/edwards25519` and `internal/ed25519/extra25519`,
+vendored copies rather than the maintained `filippo.io/edwards25519`. `extra25519.HashToEdwards` is
+the Elligator implementation, and the package doc notes the map "covers half of E" — the cofactor
+clearing by three doublings is what brings the result into the prime-order subgroup. None of this
+code is constant-time by construction, and none of it receives upstream security fixes. See
+[security notes](/reference/security).
+:::
+
+:::note[`Verify` does not check that the public key is in the prime-order subgroup]
+It calls `FromBytesBaseGroup` on the encoded point, which rejects non-canonical encodings, but the
+protocol's security against a maliciously chosen public key rests on the cofactor clearing inside
+`hashToCurve` rather than on validating the key. If public keys arrive from untrusted parties in your
+protocol, validate them yourself before storing.
+:::
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Schnorr proofs" href="/zero-knowledge/schnorr" icon="binary">
+    The general sigma protocol this VRF's proof is a specialisation of.
+  </Card>
+  <Card title="Threshold Ed25519" href="/threshold/threshold-ed25519" icon="users">
+    Standards-conformant Ed25519 from distributed shares — the interoperable neighbour of this
+    package's non-standard key handling.
+  </Card>
+  <Card title="Curve abstraction" href="/foundations/curves" icon="git-branch">
+    The library's Ed25519 curve type, which this package deliberately bypasses.
+  </Card>
+  <Card title="Security notes" href="/reference/security" icon="shield">
+    Vendored code, non-standard constructions, and unvalidated inputs across the library.
+  </Card>
+</CardGroup>

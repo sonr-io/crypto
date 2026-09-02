@@ -1,0 +1,285 @@
+---
+title: Arithmetic & Commitments
+description: The core package — modular arithmetic over big.Int with explicit moduli, constant-time comparison, hash-to-field, Fiat–Shamir, safe primes, and the HMAC commitment scheme.
+sidebar:
+  order: 3
+  icon: sigma
+---
+
+`core` is the one package in this library that does **not** use the [curve abstraction](/foundations/curves). It works directly on `math/big` integers with an explicit modulus, and it exists because a handful of constructions — Paillier, the legacy `sharing/v1` and `dkg/gennaro` layers, the older threshold ECDSA code — need integer arithmetic in a group whose order is not a curve order.
+
+**Reach for `core` when** you are implementing something over the integers mod `m` for an `m` you chose yourself, need a byte-level HMAC commitment, or need RFC-shaped hash-to-field. **Do not reach for it** to do scalar arithmetic on a curve — `curve.Scalar` is faster, constant-time-oriented, and cannot silently escape its field.
+
+## Modular arithmetic
+
+Every helper takes the modulus as its *last* argument and returns `(*big.Int, error)`. The error is not decoration: it is how the package refuses nil inputs instead of panicking.
+
+<TypeTable
+  type={{
+    "Add(x, y, m)": {
+      type: "(*big.Int, error)",
+      description: "z = x + y mod m. If m is nil the result is the unbounded integer sum. Errors only if x or y is nil.",
+    },
+    "Mul(x, y, m)": {
+      type: "(*big.Int, error)",
+      description: "z = x * y mod m. If m is nil the result is the unbounded product. Errors only if x or y is nil.",
+    },
+    "Exp(x, y, m)": {
+      type: "(*big.Int, error)",
+      description: "z = x^y mod m. Thin wrapper over big.Int.Exp; a nil m means no reduction. Errors only if x or y is nil.",
+    },
+    "Neg(x, m)": {
+      type: "(*big.Int, error)",
+      description: "z = -x mod m, reduced into [0, m). m is required — nil m is an error.",
+    },
+    "Inv(x, m)": {
+      type: "(*big.Int, error)",
+      description: "y such that x*y = 1 mod m. Errors if x is not invertible mod m ('cannot compute the multiplicative inverse').",
+    },
+    "Rand(m)": {
+      type: "(*big.Int, error)",
+      description: "Cryptographically secure random integer strictly in the range 1 < r < m. Rejection-samples until r > 1.",
+    },
+    "In(x, m)": {
+      type: "error",
+      description: "Membership test: nil if 0 <= x < m, otherwise internal.ErrZmMembership.",
+    },
+    "AnyNil(values ...)": {
+      type: "bool",
+      description: "true if any argument is nil. Used as the guard clause in every function above.",
+    },
+  }}
+/>
+
+Package-level integer constants are provided so you are not allocating them in loops: `core.Zero`, `core.One`, `core.Two`.
+
+```go title="modular.go"
+package main
+
+import (
+	"fmt"
+	"math/big"
+
+	"github.com/sonr-io/crypto/core"
+)
+
+func main() {
+	m, _ := new(big.Int).SetString(
+		"208351617316091241234326746312124448251235562226470491514186331217050270460481", 10)
+
+	a, err := core.Rand(m)
+	if err != nil {
+		panic(err)
+	}
+	b, err := core.Rand(m)
+	if err != nil {
+		panic(err)
+	}
+
+	ab, _ := core.Mul(a, b, m)
+	aInv, err := core.Inv(a, m)
+	if err != nil {
+		panic(err) // a shares a factor with m
+	}
+
+	// (a*b) * a^-1 == b
+	back, _ := core.Mul(ab, aInv, m)
+	fmt.Println(core.ConstantTimeEq(back, b)) // true
+	fmt.Println(core.In(ab, m) == nil)        // true
+}
+```
+
+:::warning[`Add`, `Mul`, and `Exp` treat a nil modulus as "no reduction"]
+This is deliberate — the source comment says *"we leave the value as an unbound integer"* — and it is a live footgun. `core.Add(x, y, nil)` succeeds and returns an unreduced integer that will fail a later `In` check or leak the un-modded value into a transcript. `Neg` and `Inv` require the modulus and error on nil. Do not rely on the guard clauses to catch a forgotten modulus.
+:::
+
+:::danger[`Rand` never returns 0 or 1]
+The range is strictly `1 < r < m`. The source explains why: a 1 offers no hiding when multiplied into a Fiat–Shamir combination, and a 0 collapses the result. This is the right default for blinding factors, but it means `core.Rand` is **not** a uniform sample over the whole of `Z_m` — if a protocol's soundness argument needs uniformity over the full range, this is the wrong function.
+:::
+
+## Constant-time comparison
+
+```go
+func ConstantTimeEqByte(a, b *big.Int) byte // 0x1 if equal, 0x0 otherwise
+func ConstantTimeEq(a, b *big.Int) bool     // ConstantTimeEqByte(a, b) == 1
+```
+
+Both compare `a.Bytes()` against `b.Bytes()` via `crypto/subtle.ConstantTimeCompare` **and** compare `Sign()`. Two nil arguments compare equal; one nil compares unequal.
+
+:::warning[Constant time in the byte comparison only]
+`big.Int.Bytes()` returns the minimal big-endian encoding, so its *length* leaks the magnitude of the value. `subtle.ConstantTimeCompare` also returns 0 immediately when the two lengths differ. So these functions are constant-time with respect to the *contents* of equal-length values, not with respect to bit length. For comparing secrets of unknown width, pad to a fixed width first.
+:::
+
+## Hashing and hash-to-field
+
+| Function | Signature | Purpose |
+| --- | --- | --- |
+| `Hash` | `Hash(msg []byte, curve elliptic.Curve) (*big.Int, error)` | Hash-to-field: one field element for the given curve. |
+| `ExpandMessageXmd` | `ExpandMessageXmd(f func() hash.Hash, msg, DST []byte, lenInBytes int) ([]byte, error)` | `expand_message_xmd` from the CFRG hash-to-curve draft, §5.4.1. |
+| `I2OSP` | `I2OSP(b, n int) []byte` | Integer-to-octet-string, `n` bytes, big-endian. |
+| `OS2IP` | `OS2IP(os []byte) *big.Int` | Octet-string-to-integer. |
+| `FiatShamir` | `FiatShamir(values ...*big.Int) ([]byte, error)` | Iterated HKDF challenge derivation; 32-byte output. |
+| `ComputeHMAC` | `ComputeHMAC(f func() hash.Hash, msg, k []byte) ([]byte, error)` | HMAC with an explicit hash constructor. |
+| `Size` | `const Size = sha256.Size` | 32 — the width of commitments and nonces in this package. |
+| `HashField` | `struct{ Order, Characteristic, ExtensionDegree *big.Int }` | Describes the field `F_p^k` for the curve being hashed to. |
+| `Params` | `struct{ F *HashField; SecurityParameter int; Hash func() hash.Hash; L int }` | Per-curve hash-to-field parameters. |
+
+### `Hash` — curve support and its fixed DST
+
+`Hash` looks up a `Params` for the curve, then runs `expand_message_xmd` and reduces to one field element. Supported curves and their parameters, read from `getParams`:
+
+| Curve (`Params().Name`) | Security parameter | Hash | `L` (bytes) |
+| --- | --- | --- | --- |
+| `secp256k1` (btcec) | 128 | SHA-256 | 48 |
+| `P-256` | 128 | SHA-256 | 48 |
+| `P-384` / `secp384r1` | 192 | SHA3-384 | 72 |
+| `P-521` / `secp521r1` | 256 | SHA-512 | 98 |
+| `Bls12381G1` | 128 | SHA-256 | 48 |
+| `ed25519` | 128 | SHA-256 | 48 |
+
+Any other curve returns `unsupported curve: <name>`.
+
+:::danger[`Hash` uses a hard-coded domain separation tag]
+The DST is the literal string `Coinbase_tECDSA`, baked into `hashToField`. There is no parameter to change it. That means:
+
+- You get **no domain separation** between two different protocols that both call `core.Hash`. Two unrelated proofs over the same curve with the same message produce the same field element.
+- It is not interoperable with any standard hash-to-curve suite ID, so it will not match another implementation's `hash_to_field`.
+
+If you need a DST you control, call `ExpandMessageXmd` directly with your own tag and reduce yourself.
+:::
+
+```go title="hash_to_field.go"
+// Custom DST, correct expansion, your own reduction.
+okm, err := core.ExpandMessageXmd(sha256.New, msg, []byte("MYPROTO-V01-CS01"), 48)
+if err != nil {
+	return nil, err
+}
+e := new(big.Int).Mod(core.OS2IP(okm), fieldCharacteristic)
+```
+
+`ExpandMessageXmd` errors only when `ceil(lenInBytes / hashSize) > 255`. It takes the hash *constructor*, not a `hash.Hash`, and it will nil-dereference if you pass `nil` — there is no guard.
+
+### `FiatShamir`
+
+Derives a 32-byte challenge from a sequence of integers. The construction is an iterated HKDF-SHA256: for each value, `okm_i = HKDF(f_i || value_i || okm_{i-1})`, where `f_i` is a 32-byte prefix whose leading byte decrements per iteration (`0xFF`, then `0xFE`, …). The source cites Signal's [X3DH](https://signal.org/docs/specifications/x3dh/#cryptographic-notation) and [XEdDSA](https://signal.org/docs/specifications/xeddsa/#hash-functions) notes as the design source. `info` is the fixed string `Coinbase tECDSA 1.0`; the salt is 32 zero bytes.
+
+```go
+challenge, err := core.FiatShamir(commitment, publicKey, nonce)
+```
+
+:::warning[Chaining, not concatenation — and the prefix trick is unusual]
+Because each value is folded in separately and the previous output is appended to the next input, `FiatShamir(a, b)` is **not** `FiatShamir(concat(a, b))` — good, that is the point. But note the values are folded as `value.Bytes()`, the minimal big-endian encoding, so a value's length is not committed to. Two different value *sequences* whose concatenated minimal encodings coincide are still distinguished by the chaining, but the `info` string is fixed at `Coinbase tECDSA 1.0`, so there is again no per-protocol domain separation. Prefix your own protocol label as the first `*big.Int` if you need it.
+:::
+
+## Safe primes
+
+```go
+func GenerateSafePrime(bits uint) (*big.Int, error)
+```
+
+Returns a prime `p = 2q + 1` where `q` is also prime (a Sophie Germain prime), with `p` of the requested bit length. `bits` must be at least 3. The implementation picks a `bits-1`-bit prime `q`, computes `2q + 1`, and retries until `ProbablyPrime` accepts it with `max(bits/16, 8)` Miller–Rabin rounds.
+
+:::warning[Expensive by construction]
+This is a rejection loop over `rand.Prime`, and the density of safe primes makes it dramatically slower than generating an ordinary prime of the same size. It is the dominant cost of [Paillier](/zero-knowledge/paillier) key generation, which needs two of them. Generate keys ahead of time, off the request path; never call this inside a handler.
+:::
+
+## Commitments
+
+`core` ships one commitment scheme, and it is a hash commitment — not Pedersen, not polynomial. It commits to *bytes*, not to a group element.
+
+```go
+type Commitment []byte // 32 bytes: HMAC-SHA256(key = nonce, msg)
+
+type Witness struct {
+	Msg []byte
+	// unexported: r [32]byte, the random nonce
+}
+
+func Commit(msg []byte) (Commitment, *Witness, error)
+func Open(c Commitment, d Witness) (bool, error)
+```
+
+`Commit` draws a 32-byte nonce from `crypto/rand` and returns `HMAC-SHA256(msg, key = nonce)` as the commitment, with the nonce hidden inside the `Witness`. `Open` recomputes the HMAC from `d.Msg` and the witness nonce and compares against `c` with `subtle.ConstantTimeCompare`.
+
+```go title="commit.go"
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+
+	"github.com/sonr-io/crypto/core"
+)
+
+func main() {
+	// Committer: publish c, keep w secret until the reveal phase.
+	c, w, err := core.Commit([]byte("bid: 42"))
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(len(c) == core.Size) // true, 32 bytes
+
+	// Witness marshals to JSON (msg + nonce) so it can be sent on reveal.
+	wire, _ := json.Marshal(w)
+
+	// Verifier: after receiving the witness.
+	var got core.Witness
+	if err := json.Unmarshal(wire, &got); err != nil {
+		panic(err)
+	}
+	ok, err := core.Open(c, got)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(ok) // true
+}
+```
+
+**Properties as implemented.** Hiding rests on HMAC-SHA256 being a PRF under the fresh 32-byte random key — the commitment is a PRF evaluation keyed by a secret nonce, so it reveals nothing about `msg` to anyone without the nonce. Binding rests on collision resistance: to open the same 32-byte commitment to a different message you would need `HMAC(msg', k') == HMAC(msg, k)`.
+
+:::warning[Length is not committed independently, and `Open` only length-checks the commitment]
+`Open` rejects a commitment whose length is not exactly `core.Size` (32), then does a constant-time compare. It performs no validation on the witness beyond that. In particular:
+
+- The nonce is unexported and has no accessor — the only way to move a `Witness` between processes is its JSON marshalling. The wire shape has **no `json` tags**, so the field names are the Go defaults: `{"Msg":"<base64>","R":[209,218,...]}` — capital `Msg`, capital `R`, and the nonce as a 32-element JSON array of numbers, not base64 (it is a `[32]byte` array, not a slice). Anything reimplementing this format in another language must match that exactly.
+- `UnmarshalJSON` performs no validation. A witness with an all-zero `R` decodes fine, and `Open` will then verify any commitment that was (incorrectly) produced with a zero nonce. Since `Commit` is the only way to get a nonce and it always reads 32 bytes from `crypto/rand`, this only bites if you hand-construct witnesses.
+- There is no transcript or context binding. If your protocol has multiple concurrent commitments, include a session/index label inside `msg` yourself; the scheme will not do it for you.
+:::
+
+:::note[This is not a Pedersen commitment]
+If you need additive homomorphism, or to commit to a scalar so that the commitment can be combined in the group, use the Pedersen VSS machinery in [secret sharing](/threshold/secret-sharing) or the Pedersen vector commitments inside [Bulletproofs](/zero-knowledge/bulletproof). `core.Commit` is the right tool for "reveal these bytes later" and nothing more.
+:::
+
+## The `internal` package
+
+`go doc github.com/sonr-io/crypto/internal` lists a handful of tempting helpers:
+
+```
+func B10(s string) *big.Int
+func BigInt2Ed25519Point(y *big.Int) (*edwards25519.Point, error)
+func BigInt2Ed25519Scalar(x *big.Int) (*edwards25519.Scalar, error)
+func ByteSub(b []byte)
+func CalcFieldSize(curve elliptic.Curve) int
+func Hash(info []byte, values ...[]byte) ([]byte, error)
+func ReverseScalarBytes(inBytes []byte) []byte
+```
+
+plus the sentinel errors this library returns from `core`: `ErrNotOnCurve`, `ErrPointsDistinctCurves`, `ErrZmMembership`, `ErrResidueOne`, `ErrNCannotBeZero`, `ErrNilArguments`, `ErrZeroValue`, `ErrInvalidRound`, `ErrIncorrectCount`, `ErrInvalidJson`. There are also two vendored Ed25519 helper packages, `internal/ed25519/edwards25519` and `internal/ed25519/extra25519` (the latter with `PrivateKeyToCurve25519`, `PublicKeyToCurve25519`, `HashToEdwards`, `RepresentativeToPublicKey`, `ScalarBaseMult`).
+
+:::danger[You cannot import any of these]
+Go's `internal/` visibility rule confines them to `github.com/sonr-io/crypto/...`. Downstream modules cannot import `github.com/sonr-io/crypto/internal` at all — the compiler rejects it. This matters because `core`'s errors are *values from that package*: `core.In` returns `internal.ErrZmMembership` and `core.Add` returns `internal.ErrNilArguments`, but you have no way to name those variables in your own code.
+
+**Workaround:** compare the message (`err.Error() == "x ∉ Z_m"`), or — better — treat these as opaque failures and validate your inputs before calling. Do not build control flow on `errors.Is` against a sentinel you cannot reference.
+:::
+
+`internal.ReverseScalarBytes` and `internal.CalcFieldSize` are the two you will most want and most miss; both are two lines and trivially reimplemented (`(curve.Params().BitSize + 7) / 8` for the latter).
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Protocol iterator" href="/foundations/protocol" icon="arrow-left-right">
+    How interactive protocols in this library are cranked round by round.
+  </Card>
+  <Card title="Paillier" href="/zero-knowledge/paillier" icon="binary">
+    The main consumer of `GenerateSafePrime` and the modular arithmetic helpers.
+  </Card>
+</CardGroup>

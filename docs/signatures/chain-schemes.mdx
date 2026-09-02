@@ -1,0 +1,476 @@
+---
+title: Chain-Specific Schemes
+description: Mina-protocol Schnorr over Pallas with Poseidon, and NEM's Keccak-512 flavoured Ed25519 — interop code for two specific networks, not general-purpose primitives.
+sidebar:
+  order: 6
+  icon: link
+---
+
+Everything under `signatures/schnorr` exists to produce bytes that one particular blockchain will
+accept. These are not primitives you choose on cryptographic merit; you use them because you are
+talking to Mina or to NEM/Symbol and their consensus rules define the signature format down to the
+hash function. Both live under a `schnorr` directory, but only Mina is actually Schnorr — NEM is
+Ed25519 with a hash substitution.
+
+If you are not integrating with those two networks, nothing on this page is for you. For general
+signing see [BLS](/signatures/bls), [ECDSA utilities](/signatures/ecdsa), or
+[threshold Ed25519](/threshold/threshold-ed25519).
+
+## Mina: Schnorr over Pallas
+
+```go
+import "github.com/sonr-io/crypto/signatures/schnorr/mina"
+```
+
+Mina's signature scheme is Schnorr on the **Pallas** curve with the **Poseidon** algebraic hash. Both
+choices exist because Mina's recursive SNARKs must verify signatures *inside* a circuit, where
+SHA-256 is ruinously expensive and Poseidon is cheap. The package mirrors
+[Mina's C reference signer](https://github.com/MinaProtocol/c-reference-signer) — the tests use that
+project's key and transaction fixtures.
+
+Signing computes `k` deterministically from the key, the public key, the network id, and the message
+(`msgDerive`), negates `k` when `R` has an odd y-coordinate, and returns `(R.x, s)` where
+`s = k + e·sk` and `e` is the Poseidon hash of the public key, `R.x`, the message, and the network
+id. There is no randomness at signing time.
+
+### Keys and addresses
+
+<TypeTable
+  type={{
+    "NewKeys()": {
+      type: "(*PublicKey, *SecretKey, error)",
+      description: "Fresh keypair from crypto/rand. Public key first. Errors on a zero scalar or identity point.",
+    },
+    "NewKeysFromReader(reader io.Reader)": {
+      type: "(*PublicKey, *SecretKey, error)",
+      description: "Same, from a supplied reader — use for deterministic test fixtures.",
+    },
+    "SecretKey.GetPublicKey()": {
+      type: "*PublicKey",
+      description: "Scalar multiplication of the Pallas generator. No error return.",
+    },
+    "PublicKey.GenerateAddress()": {
+      type: "string",
+      description: "Base58 Mina address: 0xcb version byte, 0x01 non-zero-curve-point version, 0x01 compressed flag, the 32-byte x coordinate, a y-parity byte, and a 4-byte double-SHA-256 checksum — 40 bytes encoded. These are the strings beginning \"B62q\".",
+    },
+    "PublicKey.ParseAddress(b58 string)": {
+      type: "error",
+      description: "Decodes and validates length, all three version bytes, and the checksum (compared in constant time) before recovering the point.",
+    },
+    "SecretKey.MarshalBinary()": {
+      type: "([]byte, error)",
+      description: "32 bytes, the Fq scalar. UnmarshalBinary requires exactly 32.",
+    },
+    "PublicKey.MarshalBinary()": {
+      type: "([]byte, error)",
+      description: "Compressed affine Pallas point. Distinct from the address encoding.",
+    },
+  }}
+/>
+
+`SetPointPallas(*curves.PointPallas)` and `SetFq(*fq.Fq)` are the escape hatches that let a threshold
+signer inject externally-produced key material — see the FROST bridge below.
+
+### Signing
+
+`SignTransaction` is the real API; `SignMessage` is a convenience for signing a plain string.
+
+<TypeTable
+  type={{
+    "SecretKey.SignTransaction(txn *Transaction)": {
+      type: "(*Signature, error)",
+      description: "Builds a random-oracle input with 3 field elements and 75 bytes of packed data, then signs under txn.NetworkId.",
+    },
+    "SecretKey.SignMessage(message string)": {
+      type: "(*Signature, error)",
+      description: "Signs the raw string bytes. Non-standard — the Mina reference signer does the same thing. Hardcoded to MainNet.",
+    },
+    "PublicKey.VerifyTransaction(sig, txn)": {
+      type: "error",
+      description: "nil means valid. Uses txn.NetworkId.",
+    },
+    "PublicKey.VerifyMessage(sig, message)": {
+      type: "error",
+      description: "nil means valid. Also hardcoded to MainNet.",
+    },
+  }}
+/>
+
+`Signature` is the only struct here with exported fields:
+
+```go
+type Signature struct {
+	R *fp.Fp // x coordinate of the nonce point, base field
+	S *fq.Fq // response scalar, scalar field
+}
+```
+
+`MarshalBinary` produces exactly 64 bytes, `R` then `S`; `UnmarshalBinary` requires exactly 64 and
+validates both field elements.
+
+Grounded in `TestSecretKeySignTransaction`.
+
+```go mina.go
+package main
+
+import (
+	"fmt"
+	"log"
+
+	"github.com/sonr-io/crypto/signatures/schnorr/mina"
+)
+
+func main() {
+	pk, sk, err := mina.NewKeys()
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("address:", pk.GenerateAddress())
+
+	feePayer := new(mina.PublicKey)
+	if err := feePayer.ParseAddress("B62qiy32p8kAKnny8ZFwoMhYpBppM1DWVCqAPBYNcXnsAHhnfAAuXgg"); err != nil {
+		log.Fatal(err)
+	}
+	receiver := new(mina.PublicKey)
+	if err := receiver.ParseAddress("B62qrcFstkpqXww1EkSGrqMCwCNho86kuqBd4FrAAUsPxNKdiPzAUsy"); err != nil {
+		log.Fatal(err)
+	}
+
+	txn := &mina.Transaction{
+		Fee:        3,
+		FeeToken:   1,
+		Nonce:      200,
+		ValidUntil: 10000,
+		Memo:       "this is a memo",
+		FeePayerPk: feePayer,
+		SourcePk:   feePayer,
+		ReceiverPk: receiver,
+		TokenId:    1,
+		Amount:     42,
+		Locked:     false,
+		Tag:        [3]bool{false, false, false}, // all false = payment
+		NetworkId:  mina.MainNet,
+	}
+
+	sig, err := sk.SignTransaction(txn)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := sk.GetPublicKey().VerifyTransaction(sig, txn); err != nil {
+		log.Fatal("invalid: ", err)
+	}
+
+	raw, err := sig.MarshalBinary()
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("signature bytes:", len(raw)) // 64
+}
+```
+
+Setting `Tag: [3]bool{false, false, true}` makes it a stake delegation instead of a payment, as in
+`TestSecretKeySignTransactionStaking`.
+
+### The `Transaction` type
+
+<TypeTable
+  type={{
+    Fee: { type: "uint64", description: "Fee in nanomina." },
+    FeeToken: { type: "uint64", description: "Token id used to pay the fee — 1 for MINA." },
+    FeePayerPk: { type: "*PublicKey", required: true, description: "Must be non-nil; MarshalBinary dereferences it." },
+    Nonce: { type: "uint32", description: "Account nonce." },
+    ValidUntil: { type: "uint32", description: "Expiry slot." },
+    Memo: { type: "string", description: "At most 32 bytes — longer values are silently truncated. See the caveat below." },
+    Tag: { type: "[3]bool", description: "Transaction kind. {false,false,false} is a payment; {false,false,true} is a stake delegation." },
+    SourcePk: { type: "*PublicKey", required: true, description: "Sender. Must be non-nil." },
+    ReceiverPk: { type: "*PublicKey", required: true, description: "Recipient, or the new delegate. Must be non-nil." },
+    TokenId: { type: "uint64", description: "Token being moved." },
+    Amount: { type: "uint64", description: "Amount in nanomina. Zero for a delegation." },
+    Locked: { type: "bool", description: "Timelock flag." },
+    NetworkId: { type: "NetworkType", description: "Selects the Poseidon sponge IV and enters the nonce derivation. TestNet is the zero value." },
+  }}
+/>
+
+`MarshalBinary` writes a fixed **175-byte** layout: fee, fee token, fee-payer point, nonce, valid
+until, a `0x01` marker, memo length, 32 memo bytes, three tag bytes, source point, receiver point,
+token id, amount, locked flag, and finally the network id at offset 174. `UnmarshalBinary` reverses
+it and requires that exact length. This encoding is what the FROST bridge parses.
+
+### Network types
+
+`NetworkType` selects the Poseidon sponge initialisation vector and is mixed into the nonce
+derivation, so a signature made for one network is invalid on another — that is deliberate replay
+protection.
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `TestNet` | `0` | Mina testnet IV. Also the zero value of `NetworkType`, so a `Transaction` you forgot to fill in is a testnet transaction. |
+| `MainNet` | `1` | Mina mainnet IV. |
+| `NullNet` | `2` | Zero-initialised sponge state, no IV. Used by the Poseidon unit tests for raw-permutation vectors. |
+
+### Poseidon internals
+
+You do not need these to sign, but they are exported and occasionally useful for testing a circuit
+against the same hash.
+
+<TypeTable
+  type={{
+    "Permutation (int)": {
+      type: "ThreeW | FiveW | Three",
+      description: "Which Poseidon parameter set to run. Values 0, 1, 2. Every signing path in the package uses ThreeW.",
+    },
+    "SBox (int)": {
+      type: "Cube | Quint | Sept | Inverse",
+      description: "The exponentiation applied in each round: x^3, x^5, x^7, x^-1. Values 0..3. Selected by the parameter set, not by the caller. SBox.Exp(f *fp.Fp) mutates f in place.",
+    },
+    "Context": {
+      type: "struct",
+      description: "The Poseidon sponge. Init(pType, networkId) loads round constants, MDS matrix, and IV; Update(fields []*fp.Fp) absorbs, permuting whenever the rate fills; Digest() permutes a final time and returns state[0] reinterpreted as an Fq scalar.",
+    },
+    "BitVector": {
+      type: "struct",
+      description: "Variable-length bit buffer with Append, Insert, Delete, Set, Element, Length, Bytes. Used to pack transaction fields into field elements. Documented as not thread safe.",
+    },
+    "Permutation.Permute(ctx *Context)": {
+      type: "",
+      description: "Runs the permutation in place on a Context.",
+    },
+  }}
+/>
+
+```go
+ctx := new(mina.Context).Init(mina.ThreeW, mina.MainNet)
+ctx.Update(fields)     // []*fp.Fp
+digest := ctx.Digest() // *fq.Fq
+```
+
+:::warning[`Context.Init` reports failure by returning `nil`]
+An out-of-range `Permutation` or `NetworkType` makes `Init` return a nil `*Context` rather than an
+error. The very next `ctx.Update(...)` panics with a nil dereference. Check the return value.
+:::
+
+The task-facing type `roinput` — the random-oracle input builder that packs a transaction into field
+elements and bits — is **unexported**. You cannot construct one, and the only way to reach that
+packing logic is through `SignTransaction`, `SignMessage`, or `MinaTSchnorrHandler`.
+
+### Bridging to threshold signing
+
+`MinaTSchnorrHandler` adapts Mina's challenge derivation to the library's FROST-style threshold
+Schnorr signer, so a Mina key can be split across parties. See
+[threshold Ed25519](/threshold/threshold-ed25519) for the signer this plugs into.
+
+```go
+func (m MinaTSchnorrHandler) DeriveChallenge(
+	msg []byte,
+	pubKey curves.Point, // must be a *curves.PointPallas
+	r curves.Point,      // must be a *curves.PointPallas
+) (curves.Scalar, error)
+```
+
+`msg` is **not** an arbitrary message: the handler calls `Transaction.UnmarshalBinary(msg)` on it, so
+it must be the 175-byte transaction encoding produced by `Transaction.MarshalBinary`. Anything else
+returns "invalid byte sequence".
+
+:::danger[`DeriveChallenge` ignores the transaction's network id]
+The handler hardcodes `msgHash(pk, R.X(), input, ThreeW, MainNet)`. It parses `msg` into a
+`Transaction`, which carries a `NetworkId` field, and then discards it. Threshold-signing a testnet
+transaction through this handler produces a challenge computed with the **mainnet** sponge IV, so
+the resulting signature will not verify with `VerifyTransaction` for any `NetworkId` other than
+`MainNet`. There is no way to override this from the outside.
+:::
+
+### Mina caveats
+
+:::danger[`Transaction.UnmarshalJSON` does not work]
+The method type-asserts `Body[1]` from `any` directly to its concrete struct types
+(`txnBodyPaymentJson`, `[2]any`). `encoding/json` decodes an unconstrained `any` into
+`map[string]any` and `[]any`, so those assertions can never succeed. Every call returns
+`unexpected type`. Confirmed against a well-formed payload built from the fixtures in
+`keys_test.go`:
+
+```
+UnmarshalJSON err = unexpected type
+SourcePk nil: true  Amount: 0  TokenId: 0
+```
+
+Even if the assertions were fixed, the method never assigns `SourcePk`, `Amount`, `TokenId`,
+`Locked`, or `Tag`; it computes a `sourcePk` local and drops it; it swallows a `ParseAddress` error
+in the payment branch with a bare `return nil`; and it indexes the decoded memo as
+`memo[2 : 2+memo[1]]` without a length check. There is no corresponding `MarshalJSON`. Build
+`Transaction` values in Go and use `MarshalBinary` for the wire; do not route Mina transactions
+through this JSON path.
+:::
+
+:::warning[Memos longer than 32 bytes corrupt the encoding]
+`MarshalBinary` writes `out[57] = byte(len(txn.Memo))` and then `copy(out[58:90], txn.Memo)`. The
+copy caps at the 32-byte destination, but the recorded length does not — so a 40-byte memo produces
+a transaction claiming length 40 with only 32 bytes present, and a 256-byte memo records length 0.
+Neither is rejected. Truncate memos to 32 bytes yourself before signing.
+:::
+
+:::warning[`SignMessage` and `VerifyMessage` are MainNet-only]
+Both hardcode `MainNet`; there is no network parameter and no variant that takes one. Only
+`SignTransaction` / `VerifyTransaction` honour `NetworkId`.
+:::
+
+:::note[Nil public keys panic]
+`Transaction.MarshalBinary` dereferences `FeePayerPk`, `SourcePk`, and `ReceiverPk` without nil
+checks. A partially-filled `Transaction` panics rather than returning an error.
+:::
+
+## NEM: Ed25519 with Keccak-512
+
+```go
+import "github.com/sonr-io/crypto/signatures/schnorr/nem"
+```
+
+NEM (and its successor Symbol) adopted Ed25519 before the standard settled and substituted
+**Keccak-512** for SHA-512 in every hashing step — key expansion, nonce derivation, and challenge
+computation. There is one further quirk: the seed is **byte-reversed** before hashing, which the
+source comments call a "weird required step to get compatibility with the NEM test vectors".
+
+Everything else is textbook Ed25519 over Edwards25519, and this package is unusually well grounded:
+`ed25519_keccak_test.go` checks derivation and signing against fixtures pulled from
+[symbol/test-vectors](https://github.com/symbol/test-vectors), with a comment noting that all 10000
+vectors passed at the time of writing.
+
+### Constants and API
+
+| Constant | Value |
+| --- | --- |
+| `PublicKeySize` | `32` |
+| `PrivateKeySize` | `64` |
+| `SignatureSize` | `64` |
+| `SeedSize` | `32` |
+
+<TypeTable
+  type={{
+    "GenerateKey(rand io.Reader)": {
+      type: "(PublicKey, PrivateKey, error)",
+      description: "Reads a 32-byte seed (crypto/rand when rand is nil) and expands it. Public key first.",
+    },
+    "NewKeyFromSeed(seed []byte)": {
+      type: "(PrivateKey, error)",
+      description: "Deterministic derivation from a 32-byte seed. Reverses the seed, hashes with Keccak-512, clamps the low 32 bytes into a scalar, and stores seed ‖ publicKey.",
+    },
+    "Sign(privateKey PrivateKey, message []byte)": {
+      type: "([]byte, error)",
+      description: "64-byte signature. Errors — does not panic — on a wrong-length key, despite what the doc comment says.",
+    },
+    "Verify(publicKey PublicKey, message, sig []byte)": {
+      type: "(bool, error)",
+      description: "Note the two return values: check both.",
+    },
+    "Keccak512(data []byte)": {
+      type: "([]byte, error)",
+      description: "Exported because the surrounding NEM protocol hashes with it too — addresses, block hashes.",
+    },
+    "PrivateKey.Public()": {
+      type: "crypto.PublicKey",
+      description: "Returns a nem.PublicKey as crypto.PublicKey. Type-assert it: priv.Public().(nem.PublicKey).",
+    },
+    "PrivateKey.Seed()": {
+      type: "[]byte",
+      description: "A copy of the leading 32 bytes.",
+    },
+    "PrivateKey.Sign(rand, message, opts)": {
+      type: "([]byte, error)",
+      description: "The crypto.Signer interface. opts.HashFunc() must be crypto.Hash(0); rand is ignored because signing is deterministic.",
+    },
+    "PublicKey.Bytes()": {
+      type: "[]byte",
+      description: "The underlying slice.",
+    },
+  }}
+/>
+
+Grounded in `TestPrivToPubkey` and `TestSigs`.
+
+```go nem.go
+package main
+
+import (
+	"encoding/hex"
+	"fmt"
+	"log"
+
+	"github.com/sonr-io/crypto/signatures/schnorr/nem"
+)
+
+func main() {
+	// A NEM test vector: private key and its expected public key.
+	seed, err := hex.DecodeString(
+		"575DBB3062267EFF57C970A336EBBC8FBCFE12C5BD3ED7BC11EB0481D7704CED")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	priv, err := nem.NewKeyFromSeed(seed)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	pub := priv.Public().(nem.PublicKey)
+	fmt.Println("public key:",
+		hex.EncodeToString(pub.Bytes()))
+	// c5f54ba980fcbb657dbaaa42700539b207873e134d2375efeab5f1ab52f87844
+	// — the public key the symbol/test-vectors fixture pairs with that seed.
+
+	msg := []byte("transfer")
+	sig, err := nem.Sign(priv, msg)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	ok, err := nem.Verify(pub, msg, sig)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("valid:", ok, "bytes:", len(sig)) // true 64
+}
+```
+
+### NEM caveats
+
+:::danger[These keys and signatures are NOT interchangeable with `crypto/ed25519`]
+The hash function differs at every step, and the seed is reversed before expansion. Concretely:
+
+- `nem.NewKeyFromSeed(seed)` and `ed25519.NewKeyFromSeed(seed)` derive **different public keys** from
+  the same seed.
+- A `nem.PrivateKey` handed to `ed25519.Sign` produces a signature that does not verify under the
+  public key embedded in that same private key.
+- A signature from `nem.Sign` will never verify with `ed25519.Verify`, and vice versa.
+
+Both types are `[]byte` with identical 32/64-byte layouts, so nothing in the type system stops you
+mixing them. Never share a seed, a key, or a signature between the two. If you need standards
+Ed25519, use `crypto/ed25519` or [threshold Ed25519](/threshold/threshold-ed25519).
+:::
+
+:::warning[Doc comments promise panics the code does not deliver]
+`Sign`, `Verify`, and `NewKeyFromSeed` carry doc comments inherited from the standard library saying
+"It will panic if len(...) is not ...". The implementations return an `error` instead. Code written
+against the comments — assuming a wrong length is unreachable and therefore ignoring the error — will
+silently proceed with a `nil` signature.
+:::
+
+:::note[`Verify` returns `(bool, error)`]
+Unlike `crypto/ed25519.Verify`, which returns a bare `bool`. The error path fires when the internal
+Keccak write fails or the public key is malformed. Check both values.
+:::
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Threshold Ed25519" href="/threshold/threshold-ed25519" icon="users">
+    The FROST signer that `MinaTSchnorrHandler` plugs its challenge derivation into.
+  </Card>
+  <Card title="Curve abstraction" href="/foundations/curves" icon="git-branch">
+    Pallas, `PointPallas`, and `ScalarPallas` — the types the Mina package builds on.
+  </Card>
+  <Card title="Signature index" href="/signatures" icon="pen-tool">
+    Back to the scheme selection guide.
+  </Card>
+  <Card title="Security notes" href="/reference/security" icon="shield">
+    The defects on this page, collected with the rest.
+  </Card>
+</CardGroup>

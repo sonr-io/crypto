@@ -1,0 +1,390 @@
+---
+title: Security notes
+description: Critical defects, stubs, non-constant-time paths, and operational footguns found while documenting this library — including three findings that make packages unsafe or unusable as written.
+sidebar:
+  label: Security notes
+  order: 2
+  icon: shield-alert
+---
+
+This page records what a source audit turned up while these docs were written. Every claim below was
+verified against the code — most by compiling and running the affected path as an external consumer,
+a few by running the repository's own tests. Where a finding was proven by execution, the observed
+output is quoted.
+
+This is not a security audit and does not replace one. Re-check anything critical against the
+version you have vendored, since a defect may be fixed — or a new one introduced — after this page
+was written.
+
+:::danger[No audit, no warranty]
+This library has no public third-party security audit. It bundles vendored and ported code from
+several upstream projects, contains packages that are explicitly incomplete, includes arithmetic
+documented in its own comments as not constant time, and — as recorded below — ships at least one
+signature scheme that is trivially forgeable and one persistence path that cannot round-trip.
+:::
+
+## Critical
+
+Three findings deserve to be read before anything else.
+
+### BBS+ signatures are trivially forgeable
+
+**`signatures/bbs/message_generators.go` — `MessageGenerators.Get`**
+
+The method copies the internal state array, writes the generator index into the **copy**, then hashes
+the **original**:
+
+```go
+state := msgg.state        // array copy
+state[193] = byte(i >> 24) // index written to the copy
+// ...
+point, ok := msgg.h0.Hash(msgg.state[:]).(curves.PairingPoint) // hashes the ORIGINAL
+```
+
+The index never reaches the hash, so every message generator `H_i` for `i >= 1` is the same point.
+A BBS+ signature commits to `h_0^s · Π H_i^{m_i}`; with all `H_i` identical, it binds only the
+**sum** of the message scalars, not the individual messages or their positions.
+
+Verified by execution against this repository:
+
+```text
+Get(1..4) == Get(0):       true
+permuted verifies:         true   // a signature over [3,4,5,6] is accepted for [6,5,4,3]
+same-sum forgery verifies: true   // ...and for the unrelated vector [1,2,7,8]
+```
+
+:::danger
+Unforgeability and selective disclosure are both void. Do not use `signatures/bbs` for credentials
+or any authorization decision until `Get` hashes the mutated local copy. See [BBS+](/signatures/bbs).
+:::
+
+### A persisted MPC enclave can never be restored
+
+**`core/protocol/protocol.go` — `Message.UnmarshalJSON`**
+
+`UnmarshalJSON` decodes into `map[string]any` and then performs unchecked type assertions to
+`map[string][]byte` and `map[string]string`. `encoding/json` always produces
+`map[string]interface{}`, so the assertion cannot succeed and the call **panics** on any message
+with a non-empty `Payloads` or `Metadata` field.
+
+`mpc.EnclaveData.Marshal` serializes fine, but `Unmarshal` routes through the same decoder. The
+repository's own test fails today:
+
+```text
+$ go test ./mpc/ -run TestEnclaveData_MarshalUnmarshal
+panic: interface conversion: interface {} is map[string]interface {}, not map[string][]uint8
+  github.com/sonr-io/crypto/mpc.(*EnclaveData).Unmarshal
+      mpc/enclave.go:154
+FAIL  github.com/sonr-io/crypto/mpc
+```
+
+:::danger
+An enclave can be written to storage and never read back. The blast radius is anything that
+JSON-decodes a `protocol.Message` — `DecodeMessage`, `EnclaveData.Unmarshal`, and any transport that
+carries protocol messages as JSON. Persist enclave state through your own encoding until this is
+fixed. See [Protocol messages](/foundations/protocol) and [MPC enclave](/identity/mpc-enclave).
+:::
+
+### UCAN caveat and amount attenuation are not enforced
+
+**`ucan/verifier.go`**
+
+The two helpers that decide whether a delegated token is *more* restrictive than its parent both
+return `true` unconditionally:
+
+- `areCaveatsMoreRestrictive(childCaveats, parentCaveats []string) bool` — builds a set of the
+  parent's caveats, then runs a loop whose only branch is `continue`, and returns `true`.
+- `isAmountLessOrEqual(childAmount, parentAmount string) bool` — commented
+  `placeholder implementation`; the body is `return true`.
+
+`isAmountLessOrEqual` gates the `maxAmount` field on a DEX capability. `areCaveatsMoreRestrictive` is
+the final check in vault, DID, and DWN containment validation. Several sibling paths in the same file
+also fail open by design — `return true // Basic containment is sufficient for unknown schemes` —
+so an unrecognized resource scheme is treated as contained rather than rejected.
+
+:::danger
+A delegated token can carry caveats, or an amount, that its parent never granted and still pass
+`VerifyDelegationChain`. Do not treat caveat or amount attenuation as a security boundary; enforce
+those constraints in your own application logic. See [UCAN](/identity/ucan).
+:::
+
+## Unusable as written
+
+APIs that are present and compile, but cannot be used for their stated purpose.
+
+### Bulletproof range proofs are uncallable from outside the package
+
+`RangeProofGenerators` has only unexported fields (`g`, `h`, `u`) and the package exports no
+constructor, setter, or default. An external package cannot populate it:
+
+```text
+cannot refer to unexported field g in struct literal of type bulletproof.RangeProofGenerators
+```
+
+A zero-value `RangeProofGenerators{}` does compile, but its points are nil and `RangeProver.Prove`
+panics dereferencing `proofGenerators.h`. The commitment helpers a verifier needs are unexported too
+(`getcapV`, `getcapVBatched`, and `InnerProductProver.getP`, whose own comment says
+*"should only be used for testing"*).
+
+Net effect: `RangeProver.Prove`, `BatchProve`, `RangeVerifier.Verify`, and `VerifyBatched` are
+in-package-only. The inner-product argument is usable; the range proof is not. See
+[Bulletproofs](/zero-knowledge/bulletproof).
+
+### `sharing/v1.Bls12381G2()` returns a G1 curve
+
+```go
+func Bls12381G2() *Bls12381G1Curve {
+	bls12381g2Initonce.Do(bls12381g2InitAll)
+	return &bls12381g1 // ← the G1 curve
+}
+```
+
+The return type is `*Bls12381G1Curve` and the value returned is the package-level `bls12381g1`. The
+G2 initializer runs and its result is discarded; the singleton's `Name` is even set to
+`"Bls12381G1"`. The `Bls12381G2Curve` type does implement real G2 arithmetic, but no exported
+constructor returns it. See [Secret sharing](/threshold/secret-sharing).
+
+### `keys.PubKey.Verify` cannot verify this library's own signatures
+
+`keys/pubkey.go` requires exactly **66 bytes** laid out as `V || R || S` over a SHA3-256 digest,
+while `mpc.SerializeSignature` emits **64 bytes** as `r || s`. Feeding one to the other yields
+`malformed signature: not the correct size`. Separately, `getEcdsaPoint` slices `y = bytes[33:]` from
+a compressed 33-byte point (`Point.Bytes()` always returns compressed), so `y` decodes as zero. No
+test covers `NewPubKey` or `Verify`. See [did:key](/identity/did-key).
+
+### `mina.Transaction.UnmarshalJSON` always fails
+
+It type-asserts `Body[1]` from `any` directly to concrete struct types. `encoding/json` decodes an
+unconstrained `any` into `map[string]any` / `[]any`, so the assertion can never succeed and every
+call returns `unexpected type`. Even if the assertion were fixed, `SourcePk`, `Amount`, `TokenId`,
+`Locked`, and `Tag` are never assigned, a computed `sourcePk` local is dropped, a `ParseAddress`
+error is swallowed with `return nil`, and the memo is indexed `memo[2 : 2+memo[1]]` with no length
+check. There is no `MarshalJSON` counterpart. See [Chain schemes](/signatures/chain-schemes).
+
+### `keys/parsers` is a skeleton
+
+Five files contain nothing but a package clause: `btc_parser.go`, `eth_parser.go`, `fil_parser.go`,
+`sol_parser.go`, `ton_parser.go`. There is no Bitcoin, Ethereum, Filecoin, Solana, or TON key parsing
+in this module. `cosmos_parser.go` holds only `CosmosPrefix` HRP constants, with no functions.
+
+`keys/parsers/key_parser.go` also duplicates `keys/didkey.go` but with a **different secp256k1
+multicodec** — `0x1206` against the registered `0xe7` used by `keys` — so `parsers.DIDKey` and
+`keys.DID` produce mutually unparseable `did:key` strings for the same key.
+
+:::warning
+Use `keys`. Treat `keys/parsers` as dead code.
+:::
+
+### `ucan/stubs.go`
+
+`TokenBuilder.CreateOriginToken` and `CreateDelegatedToken` assemble a `*Token` with `Raw: ""` — they
+never sign or serialize a JWT. `isValidDID` checks only a `did:` prefix and a length, and
+`prepareDelegationProofs` merely copies the parent's `Raw` when non-empty.
+
+For a signed token use `GenerateJWTToken`, `GenerateModuleJWTToken`, or the MPC-backed
+`MPCTokenBuilder` — not the bare `TokenBuilder`.
+
+### `empty-module`
+
+A separate Go module declaring itself `github.com/tyler-smith/go-bip39`, whose functions all return
+an error or panic. Neither `go.mod` nor `go.sum` references it and there is no `go.work`, so nothing
+builds against it. There is no BIP-39 mnemonic support in this library.
+
+### `core/curves/native/pasta/pallas.go`
+
+Contains only a package clause. Working Pallas support lives in `core/curves/pallas_curve.go`
+(`PointPallas`, `ScalarPallas`, `Ep`).
+
+## Silent wrong answers
+
+Code that runs, returns no error, and is wrong.
+
+| Finding | Location | Consequence |
+| --- | --- | --- |
+| FROST DKG context is discarded | `dkg/frost/participant.go` — `ctxV, _ := strconv.Atoi(ctx)`, stored as `byte(ctxV)` | The error is dropped, so any non-numeric context — including the package's own test string — becomes the byte `0`. Every such session shares one context, and numeric values are truncated mod 256. The replay-protection domain separator does nothing as implemented. Participant ids `>= 256` truncate the same way. Inherited by `ted25519/frost`. |
+| `v1.Shamir.Combine` truncates | `sharing/v1/shamir.go` | Only the first `threshold` shares are consumed; extra shares are silently ignored rather than cross-checked. |
+| Hard-coded hash-to-field DST | `core/hash.go` — `hashToField` | The domain separation tag is the literal `Coinbase_tECDSA` with no parameter. No separation between protocols, and no interoperability with any standard hash-to-curve suite ID. |
+| Fixed Fiat-Shamir info string | `core/hash.go` — `FiatShamir` | `info` is the literal `Coinbase tECDSA 1.0` with a 32-byte zero salt. Values are folded as minimal big-endian `Bytes()`, so lengths are not committed — two different value sequences can produce one transcript. |
+| `keys.DID.Address()` is not an address | `keys/didkey.go` | The comment claims an Ethereum-style Keccak-256 truncation; the code is `fmt.Sprintf("sonr1%x", rawPubBytes[:8])` for all key types. No hash, no bech32, no checksum. It leaks 8 bytes of the public key into a 64-bit collision space. Measured: `sonr10304584a69c0f8ac`. Consumed by `ucan` via `MPCTokenBuilder.GetAddress()` and `KeyshareSource.Address()`. |
+| Mina threshold challenge is MainNet-only | `signatures/schnorr/mina/challenge_derive.go` | `DeriveChallenge` hard-codes `MainNet` after parsing a `Transaction` that carries a `NetworkId`, then discards it. FROST-signing a TestNet transaction produces a signature that will not verify. No override is exposed. |
+| Mina memo length corruption | `signatures/schnorr/mina/txn.go` — `MarshalBinary` | Writes `out[57] = byte(len(txn.Memo))` but copies at most 32 bytes. A 40-byte memo records length 40 with 32 bytes present; a 256-byte memo records length 0. Also dereferences `FeePayerPk`/`SourcePk`/`ReceiverPk` with no nil checks, so a partially filled `Transaction` panics. |
+| `NistP256.ScalarMult` is not the native path | `core/curves/p256_curve.go` | The method is spelled `ScalarMul` (missing `t`), so the `elliptic.Curve` interface method resolves to the promoted `*elliptic.CurveParams.ScalarMult` — the generic deprecated `math/big` implementation. `ScalarBaseMult`, `Add`, `Double`, and `IsOnCurve` are native. |
+| `BLS12831Name` typo is load-bearing | `core/curves/curve.go` | The constant is spelled `BLS12831` **and** its value is the string `"BLS12831"`. `curves.BLS12381(...)` assigns it, so a BLS12-381 pairing curve reports `Name == "BLS12831"`. Any name-based dispatch must match the typo. |
+| `core.Add`/`Mul`/`Exp` accept a nil modulus | `core/mod.go` | A nil modulus means no reduction rather than an error, so a missing parameter silently yields unreduced big integers. |
+| `Iterator.Result` returns `(nil, nil)` | `tecdsa/dklsv1/boilerplate.go`, all six `Result` methods | The completion check precedes the `ErrNotInitialized` check, so calling `Result` on an un-cranked iterator returns a nil message *and* a nil error. Every `Decode*` helper then nil-derefs on `m.Payloads`. |
+| `Point.SumOfProducts` signals failure with nil | `core/curves/k256_curve.go` and siblings | No error channel. Returns nil on a slice-length mismatch or on any element of a foreign concrete type, turning a length bug into a nil-deref several frames later. |
+| `Curve.ToEllipticCurve` covers 2 of 8 curves | `core/curves/curve.go` | Only `K256` and `P256` convert; `ED25519`, `PALLAS`, and all four BLS variants return nil with `can't convert <name>`. |
+| `daed.AESSIV` aliases the caller's key | `daed/aes_siv.go` | `K1`/`K2` are **exported** fields that alias `key[:32]` and `key[32:]` rather than copying. `fmt.Printf("%+v")` on an `AESSIV` prints raw key material, and zeroing the input slice silently corrupts the live cipher. |
+| `daed` decrypt ignores an error | `daed/aes_siv.go` | `DecryptDeterministically` calls `ctrCrypt` without checking its returned error, unlike the encrypt path. Latent rather than exploitable, since `ctrCrypt` can only fail if `aes.NewCipher(K2)` fails after the constructor's 64-byte check. |
+| `mpc/spec` duplicates `ucan` | `mpc/spec/` | A near-verbatim fork of `ucan/source.go` and `ucan/mpc.go` with its own `Token`, `Capability`, and `Attenuation` types. Two copies of authorization logic drift apart. `mpc/spec/source.go` also derives its address from the placeholder `fmt.Sprintf("addr_%x", pubKeyBytes[:8])`. Prefer `ucan`. |
+
+### Bulletproof range-encoding edge cases
+
+Beyond being uncallable externally, the range prover has four issues worth recording if it is ever
+fixed or used in-package:
+
+- `getaL` reads bit `i` as `vBytes[i>>3]` with no bounds check, so `n > 256` on these curves indexes
+  past the slice and panics. `NewRangeProver` accepts `maxVectorLength` above 256 with no gate.
+- `getaL` assumes `Scalar.Bytes()` is little-endian. Every bulletproof test uses ED25519 only; on a
+  big-endian-scalar curve the bit vector is reversed and will not match the commitment.
+- `Prove` rejects `v < 0` and `v > 2^n`, so `v == 2^n` passes validation but is not representable in
+  `n` bits. The unexported `checkRange` used by `BatchProve` has the same comparison despite a
+  comment claiming `[0, 2^n - 1]`, and additionally omits the negative check.
+- `n` must be a power of two, but `RangeProver.Prove` has no gate (unlike
+  `InnerProductProver.Prove`), so a bad `n` fails late inside the recursion with
+  `length of scalars must be even`.
+- `Verify` and `VerifyBatched` return `(false, nil)` with no diagnostic, so a domain,
+  `maxVectorLength`, generator, or transcript-label mismatch is indistinguishable from a dishonest
+  prover.
+
+## Non-constant-time arithmetic
+
+The following are documented as not constant time **in their own source comments**:
+
+| Location | Note |
+| --- | --- |
+| `core/curves/field.go` | `Field` and `Element` are `math/big`-backed and explicitly documented as not constant time. `NewField` and the element constructor **panic** on a non-prime modulus, an out-of-range value, or mismatched fields. |
+| `core/curves/ec_scalar.go` | The `big.Int` Euclidean `Mod` path is flagged as not constant time. Affects `K256Scalar`, `P256Scalar`, `Bls12381Scalar`, and `Ed25519Scalar`. |
+| `core` modular helpers | `Add`, `Mul`, `Exp`, `Inv`, `Neg` operate on `*big.Int`. Use `ConstantTimeEq` for comparisons and do not assume the arithmetic itself is constant time. |
+
+The modern `curves.Point` / `curves.Scalar` implementations backed by `core/curves/native`
+(Montgomery-form limb arithmetic) are the better choice for secret-dependent operations. The legacy
+`Field` / `Element` / `EcScalar` layer is used by `sharing/v1` and `dkg/gennaro`, which inherit its
+timing characteristics.
+
+## Operational footguns
+
+Not bugs — the code does what it says — but each has a severe failure mode.
+
+<Accordion>
+  <AccordionItem title="Nonce reuse in threshold Ed25519 reveals the signing key" icon="triangle-alert">
+    A nonce share from `GenerateSharedNonce` is bound to one message. Signing two different messages
+    with the same nonce share exposes the secret key through simple algebra. Generate a fresh nonce
+    per signing session; never persist and replay one. See
+    [Threshold Ed25519](/threshold/threshold-ed25519).
+  </AccordionItem>
+  <AccordionItem title="AES-GCM with a caller-supplied nonce" icon="triangle-alert">
+    `aead.AESGCMCipher.EncryptWithNonce` exists for test vectors, and its own source comment says
+    "use only for testing". Repeating a nonce under one key destroys both confidentiality (CTR
+    keystream reuse) and authenticity (GHASH subkey leakage, enabling forgeries for other messages).
+    `Encrypt` generates a random 96-bit nonce and prepends it — use that. See [AEAD](/symmetric/aead).
+  </AccordionItem>
+  <AccordionItem title="The MPC enclave holds both shares in one process" icon="triangle-alert">
+    `NewEnclave` runs both DKLs18 DKG sides locally, `EnclaveData` stores `ValShare` and `UserShare`
+    together, `Sign` builds both sign functions from the same struct, and `Marshal` emits both in the
+    clear. It is a key-management and portability construct; the threshold property only materializes
+    once the two shares live in separate trust domains. See [MPC enclave](/identity/mpc-enclave).
+  </AccordionItem>
+  <AccordionItem title="Enclave encryption uses a fixed per-enclave nonce" icon="triangle-alert">
+    `EnclaveData.Encrypt` derives an AES-256-GCM key with SHA3-256 and reuses the enclave's stored
+    nonce, which is the AES-GCM failure case above whenever more than one plaintext is encrypted.
+  </AccordionItem>
+  <AccordionItem title="The trusted dealer defeats the point of DKG" icon="triangle-alert">
+    `tecdsa/dklsv1/dealer.GenerateAndDeal` constructs both parties' shares in one process, so the
+    full key exists in one place at one time. It is a test and migration convenience. See
+    [Threshold ECDSA](/threshold/threshold-ecdsa).
+  </AccordionItem>
+  <AccordionItem title="Session ids must be unique per protocol execution" icon="triangle-alert">
+    `zkp/schnorr`, `ot/base/simplest`, and the FROST DKG all take a session id or context that
+    domain-separates the Fiat-Shamir transcript. Prover and verifier must pass identical bytes, and
+    reuse across executions weakens the soundness the caller assumes. Note the FROST context defect
+    above. See [Schnorr proofs](/zero-knowledge/schnorr).
+  </AccordionItem>
+  <AccordionItem title="Accumulator witnesses go stale on every update" icon="triangle-alert">
+    Adding or removing an element invalidates every outstanding membership witness. Holders must
+    refresh via `ApplyDelta` or `BatchUpdate` using the published `Delta`, or their proofs stop
+    verifying with the bare error `invalid result`. A revoked holder's `BatchUpdate` fails with
+    `no inverse exists`. See [Accumulator](/zero-knowledge/accumulator).
+  </AccordionItem>
+  <AccordionItem title="Shamir sharing does not detect a corrupted share" icon="triangle-alert">
+    Plain `sharing.Shamir` has no verification step, so a malicious holder can submit a garbage share
+    and silently corrupt the reconstructed secret. Use Feldman or Pedersen when holders are not
+    trusted. See [Secret sharing](/threshold/secret-sharing).
+  </AccordionItem>
+  <AccordionItem title="BLS Basic and Aug do not stop rogue-key attacks" icon="triangle-alert">
+    Only the proof-of-possession ciphersuite (`SigPop`, `SigPopVt`, and the `SigEth2` aliases)
+    defends against an attacker registering a public key derived from others'. Basic additionally
+    requires every message in an aggregate to be distinct. See [BLS](/signatures/bls).
+  </AccordionItem>
+  <AccordionItem title="Deterministic AEAD leaks plaintext equality" icon="triangle-alert">
+    `daed` produces identical ciphertext for identical plaintext and associated data. That is the
+    feature, but an observer learns which ciphertexts encrypt the same value, can join across tables,
+    and can confirm guesses offline. See [Deterministic AEAD](/symmetric/deterministic-aead).
+  </AccordionItem>
+  <AccordionItem title="A short PsfProof panics instead of erroring" icon="triangle-alert">
+    `PsfProof.Verify` indexes the proof without a length check:
+    `index out of range [3] with length 3`. Validate that a deserialized proof has `PsfProofLength`
+    elements before verifying. See [Paillier](/zero-knowledge/paillier).
+  </AccordionItem>
+  <AccordionItem title="Ciphertexts carry no algorithm or key identifier" icon="triangle-alert">
+    `aead` output is `nonce || ciphertext || tag` with no version byte, algorithm id, or key id.
+    There is no key-rotation or migration path short of re-encrypting everything.
+  </AccordionItem>
+</Accordion>
+
+## Weaker guarantees than the names suggest
+
+### `secure` does not lock memory
+
+`secure/memory.go` overwrites buffers and registers finalizers. It contains no `mlock`, `munlock`,
+or `mprotect` call, so secrets remain swappable to disk and readable from a core dump.
+`ZeroizeString` cannot work reliably at all: Go strings are immutable and freely copied, so the copy
+you zero may not be the only one. Treat these as hygiene, not a guarantee. See
+[Secrets](/symmetric/secrets).
+
+### `subtle/random` panics instead of returning an error
+
+`GetRandomBytes` and `GetRandomUint32` panic if `crypto/rand` fails rather than surfacing an error —
+a process crash originating in library code.
+
+### `salt.SaltStore` is not goroutine-safe
+
+An in-memory map with no mutex. Concurrent `Store` and `Retrieve` calls race. Serialize access
+yourself.
+
+### `ecies` has no round-trip test
+
+A thin alias layer over `github.com/ecies/go/v2`. Its test file covers key generation only — no
+encrypt/decrypt round trip is exercised in this repository. See [ECIES](/identity/ecies).
+
+### `daed` cross-implementation vectors never run
+
+`TestAESSIV_WycheproofVectors` calls `t.Skip` unless `TEST_SRCDIR` is set, so a normal
+`go test ./daed/...` never checks the RFC 5297 vectors.
+
+### `wasm.Signer.ExportPrivateKey`
+
+Returns raw Ed25519 private key bytes, so any caller holding a `*Signer` can extract the signing key.
+See [WASM modules](/identity/wasm-modules).
+
+### `keys.DID` error handling
+
+`MulticodecType()` panics with `unexpected crypto type` on an unguarded key type, and `String()`
+calls it unconditionally — so a `DID` built as a struct literal can panic. `String()` also returns
+`""` instead of an error when `Raw()` or multibase encoding fails.
+
+## What the repository does test
+
+`security_test.go` at the module root is a cross-package suite asserting properties rather than
+units. It is a useful statement of intended guarantees:
+
+- Argon2 timing behavior under configured cost, and concurrent derivation safety
+- ECDSA signing determinism and rejection of malleable (high-S) signatures
+- Password validator resistance to dictionary inputs
+- WASM module hash collision resistance
+- Salt uniqueness across generations
+- RNG output quality
+- Crypto agility across configured algorithms
+
+```bash
+go test ./... -run TestSecurity
+```
+
+Note that `go test ./mpc/` currently fails on `TestEnclaveData_MarshalUnmarshal` for the reason
+recorded above.
+
+## Reporting
+
+Found something not listed here? Open an issue at
+[github.com/sonr-io/crypto](https://github.com/sonr-io/crypto/issues). For a suspected
+vulnerability, prefer a private report over a public issue.

@@ -1,0 +1,469 @@
+---
+title: BLS Signatures
+description: Pairing-based signatures on BLS12-381 with aggregation, multi-signatures, proofs of possession, and non-interactive threshold key generation.
+sidebar:
+  order: 2
+  icon: combine
+---
+
+`signatures/bls/bls_sig` implements the BLS signature scheme from
+[draft-irtf-cfrg-bls-signature-03](https://tools.ietf.org/html/draft-irtf-cfrg-bls-signature-03) on
+BLS12-381. Its defining property is **aggregation**: any number of signatures can be combined into a
+single group element that verifies against the corresponding set of public keys, and the combined
+object is exactly the size of one signature.
+
+Reach for BLS when you need to compress many signatures (block attestations, multi-party approvals,
+certificate chains), or when you want `t`-of-`n` threshold signing **without an interactive
+protocol** — BLS partial signatures combine by plain Lagrange interpolation, so signers never talk to
+each other. Reach for something else if you need short verification time on constrained hardware
+(pairings are expensive), or if your verifier is a chain that only knows secp256k1 or Ed25519 — in
+that case see [threshold ECDSA](/threshold/threshold-ecdsa) or
+[threshold Ed25519](/threshold/threshold-ed25519).
+
+```go
+import "github.com/sonr-io/crypto/signatures/bls/bls_sig"
+```
+
+:::note
+This package does **not** use the [`core/curves`](/foundations/curves) `Curve` / `Point` / `Scalar`
+abstraction. It calls the native `core/curves/native/bls12381` backend directly and is hard-wired to
+BLS12-381 — there is no curve parameter anywhere in its API.
+:::
+
+## Two instantiations: `Vt` and non-`Vt`
+
+BLS12-381 has two source groups, G1 and G2, and the pairing is asymmetric. You must decide which
+group carries public keys and which carries signatures; whichever you put in G1 is the small one.
+The package exposes both choices as two parallel type families that share a `SecretKey` type.
+
+| | Non-`Vt` types | `Vt` types |
+| --- | --- | --- |
+| Public key group | **G1** (`PublicKey`) | **G2** (`PublicKeyVt`) |
+| Signature group | **G2** (`Signature`) | **G1** (`SignatureVt`) |
+| Compressed public key | 48 bytes (`PublicKeySize`) | 96 bytes (`PublicKeyVtSize`) |
+| Compressed signature | 96 bytes (`SignatureSize`) | 48 bytes (`SignatureVtSize`) |
+| Compressed PoP | 96 bytes (`ProofOfPossessionSize`) | 48 bytes (`ProofOfPossessionVtSize`) |
+| Trade-off | minimal **public key** size | minimal **signature** size |
+
+Secret keys are shared between the two families:
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `SecretKeySize` | `32` | A scalar mod `r`, the subgroup order. Cannot be zero. |
+| `SecretKeyShareSize` | `33` | A 32-byte share value followed by a 1-byte identifier at index 32. |
+
+`SecretKeyShareSize` being 33 rather than 32 is why shares are self-describing: the trailing
+identifier is the Shamir x-coordinate, so `CombineSignatures` can reconstruct the Lagrange
+coefficients from the partials alone. It also caps you at 255 shares — identifier `0` is invalid.
+
+Which one do you want? If your verifier stores many public keys and sees few signatures (an on-chain
+validator registry), the non-`Vt` family is cheaper. If you publish many signatures against few keys
+(per-block attestations), `Vt` is cheaper. Ethereum 2 uses the non-`Vt` layout — 48-byte pubkeys in
+G1, 96-byte signatures in G2 — which is what `NewSigEth2()` gives you.
+
+:::warning[The `Vt` doc comments are wrong in one place]
+The source comment above `SigBasicVt` in `tiny_bls.go` says "minimal-pubkey-size"; it is a
+copy-paste from the non-`Vt` file. `SigBasicVt` is minimal-*signature*-size, consistent with its
+`SignatureVt` being the 48-byte G1 element. Trust the types and the constants, not that comment.
+:::
+
+## Three ciphersuites
+
+Independently of the group choice, the draft defines three ciphersuites that differ only in what
+gets hashed and what the caller must check. Each is a distinct Go type with its own constructor and
+its own domain separation tag.
+
+| Scheme | Constructor | Signature DST | Extra requirement |
+| --- | --- | --- | --- |
+| `SigBasic` | `NewSigBasic()` | `BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_` | All messages in an aggregate must be distinct |
+| `SigAug` | `NewSigAug()` | `BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_AUG_` | Public key is prepended to the message before hashing |
+| `SigPop` | `NewSigPop()` | `BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_` | Every key needs a verified proof of possession |
+| `SigBasicVt` | `NewSigBasicVt()` | `BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_` | as above |
+| `SigAugVt` | `NewSigAugVt()` | `BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_AUG_` | as above |
+| `SigPopVt` | `NewSigPopVt()` | `BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_` | as above |
+
+`SigPop` additionally carries a second DST used only for proof-of-possession *proofs*:
+
+| Constant | Value |
+| --- | --- |
+| PoP proof DST (non-`Vt`) | `BLS_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_` |
+| PoP proof DST (`Vt`) | `BLS_POP_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_` |
+
+The `G1`/`G2` token inside each DST names the group the *signature* lives in, which is why the `Vt`
+tags say `G1`.
+
+`SigEth2` is a plain Go type alias for `SigPop`, and `SigEth2Vt` for `SigPopVt`:
+
+```go
+type SigEth2 = SigPop
+func NewSigEth2() *SigEth2 { return NewSigPop() }
+```
+
+They are naming conveniences, nothing more — `NewSigEth2()` and `NewSigPop()` return identical
+values with identical DSTs.
+
+### Overriding the DST
+
+Every scheme has a `WithDst` constructor for interoperating with a system that chose different
+domain separation:
+
+```go
+b := bls_sig.NewSigBasicWithDst("MY_APP_BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_")
+
+// SigPop needs both tags, and rejects equal ones.
+p, err := bls_sig.NewSigPopWithDst(
+	"MY_APP_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_",
+	"MY_APP_POP_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_",
+)
+```
+
+`NewSigPopWithDst` / `NewSigPopVtWithDst` are the only DST constructors that return an error: they
+reject a signature DST equal to the PoP DST. The others accept any string, including an empty one.
+
+### What each ciphersuite defends against
+
+The threat is the **rogue-key attack**. Aggregate verification checks a product of pairings. An
+attacker who is allowed to publish a public key *after* seeing honest keys can publish
+`pk_evil = g^a · (Π pk_honest)^-1` and then produce an "aggregate" signature over a message the
+honest parties never signed. The three ciphersuites each break this differently:
+
+<Tabs>
+  <Tab title="Basic">
+    Nothing binds a key to its message beyond the message itself, so security rests on the caller
+    ensuring **every message in an aggregate is distinct**. `AggregateVerify` enforces this: it
+    rejects the batch if any two message byte strings are equal. Use Basic only when your messages
+    are naturally unique (they embed a nonce, a height, a hash).
+  </Tab>
+  <Tab title="Aug">
+    `Sign` prepends the signer's own compressed public key to the message before hashing:
+    `H(pk_bytes || msg)`. That makes each signer's hashed point key-dependent, so rogue keys cannot
+    cancel. `Verify` and `AggregateVerify` reproduce the same prefix. No caller discipline is
+    required, and messages may repeat. The cost is that verification needs the exact public key
+    bytes, and `SigAug.PartialSign` therefore takes an extra `*PublicKey` argument that the other
+    schemes do not.
+  </Tab>
+  <Tab title="Pop">
+    Each signer publishes a proof of possession — a signature over their own public key under a
+    separate DST — proving they know the secret behind the key. Once every key in a set has a
+    verified PoP, rogue keys are impossible by construction, and the fast path opens up:
+    `FastAggregateVerify` and `VerifyMultiSignature` verify N signatures over the *same* message
+    with a single pairing check. This is the Eth2 configuration.
+  </Tab>
+</Tabs>
+
+:::danger[Pop only defends you if you actually call `PopVerify`]
+`FastAggregateVerify`, `AggregatePublicKeys`, and `VerifyMultiSignature` do **not** check proofs of
+possession. Nothing in the library forces you to. If you aggregate a public key you have not
+`PopVerify`'d, `SigPop` gives you no more rogue-key protection than `SigBasic` with duplicate
+messages — which is to say, none. Verify the PoP at key-registration time and refuse to store keys
+that fail.
+:::
+
+## Method set
+
+All six scheme types share this core. Signatures are `(bool, error)` — **check both**, because a
+verification that errored also returns `false`, and a nil error does not mean valid.
+
+<TypeTable
+  type={{
+    "Keygen()": {
+      type: "(*PublicKey, *SecretKey, error)",
+      description: "Reads 32 bytes from crypto/rand and derives a keypair.",
+    },
+    "KeygenWithSeed(ikm []byte)": {
+      type: "(*PublicKey, *SecretKey, error)",
+      description: "Deterministic keygen via HKDF with salt \"BLS-SIG-KEYGEN-SALT-\". ikm MUST be at least 32 bytes; shorter input is an error.",
+    },
+    "Sign(sk, msg)": {
+      type: "(*Signature, error)",
+      description: "Hashes msg to a point and multiplies by the secret. Deterministic — no nonce, so no nonce-reuse failure mode. Basic and Pop accept an empty (but not nil) message; Aug rejects both.",
+    },
+    "Verify(pk, msg, sig)": {
+      type: "(bool, error)",
+      description: "Single-signature verification.",
+    },
+    "AggregateVerify(pks, msgs, sigs)": {
+      type: "(bool, error)",
+      description: "Aggregates sigs internally, then checks the product of pairings against every (pk, msg) pair. Errors on length mismatch. Basic and Pop reject duplicate messages.",
+    },
+    "ThresholdKeygen(threshold, total uint)": {
+      type: "(*PublicKey, []*SecretKeyShare, error)",
+      description: "Generates one public key and `total` Shamir shares of its secret. Errors when threshold is 0, threshold exceeds total, total is 1 or less, or either exceeds 255.",
+    },
+    "ThresholdKeygenWithSeed(ikm, threshold, total)": {
+      type: "(*PublicKey, []*SecretKeyShare, error)",
+      description: "Same, seeded deterministically.",
+    },
+    "PartialSign(sks, msg)": {
+      type: "(*PartialSignature, error)",
+      description: "One share's contribution. Rejects nil and empty messages in every scheme. SigAug and SigAugVt take an extra *PublicKey between the share and the message.",
+    },
+    "CombineSignatures(sigs ...*PartialSignature)": {
+      type: "(*Signature, error)",
+      description: "Lagrange-interpolates partials into a normal signature. Errors on fewer than 2 partials, more than 255, a nil partial, a duplicate share identifier, or a partial outside the correct subgroup. It does NOT know your threshold — see the caveats.",
+    },
+  }}
+/>
+
+`SigPop` and `SigPopVt` add:
+
+<TypeTable
+  type={{
+    "PopProve(sk)": {
+      type: "(*ProofOfPossession, error)",
+      description: "Signs the key's own public key under the PoP DST.",
+    },
+    "PopVerify(pk, pop)": {
+      type: "(bool, error)",
+      description: "Checks a proof of possession. Run this before trusting a key in any aggregate.",
+    },
+    "AggregatePublicKeys(pks ...*PublicKey)": {
+      type: "(*MultiPublicKey, error)",
+      description: "Sums public keys into a single group element for same-message verification.",
+    },
+    "AggregateSignatures(sigs ...*Signature)": {
+      type: "(*MultiSignature, error)",
+      description: "Sums signatures over the same message.",
+    },
+    "VerifyMultiSignature(mpk, msg, msig)": {
+      type: "(bool, error)",
+      description: "Verifies a pre-aggregated key against a pre-aggregated signature. One pairing check.",
+    },
+    "FastAggregateVerify(pks, msg, asig)": {
+      type: "(bool, error)",
+      description: "Same-message verification where the signature is already aggregated but the keys are not.",
+    },
+    "FastAggregateVerifyConstituent(pks, msg, sigs)": {
+      type: "(bool, error)",
+      description: "Same, but takes the individual signatures and aggregates them for you.",
+    },
+  }}
+/>
+
+`AggregateVerify` (many distinct messages) and `FastAggregateVerify` (one shared message) are not
+interchangeable. Passing the same message N times to `AggregateVerify` under `SigBasic` or `SigPop`
+returns `false` by design.
+
+## Aggregate verification
+
+Grounded in `TestBasicAggregateVerifyG2Works` and its `generateBasicAggregateDataG2` helper.
+
+```go aggregate.go
+package main
+
+import (
+	"crypto/rand"
+	"fmt"
+	"log"
+
+	"github.com/sonr-io/crypto/signatures/bls/bls_sig"
+)
+
+func main() {
+	bls := bls_sig.NewSigBasic()
+
+	const n = 10
+	pks := make([]*bls_sig.PublicKey, n)
+	sigs := make([]*bls_sig.Signature, n)
+	msgs := make([][]byte, n)
+
+	for i := 0; i < n; i++ {
+		ikm := make([]byte, 32)
+		if _, err := rand.Read(ikm); err != nil {
+			log.Fatal(err)
+		}
+		pk, sk, err := bls.KeygenWithSeed(ikm)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// SigBasic requires every message in the batch to differ.
+		msg := []byte(fmt.Sprintf("attestation %d", i))
+		sig, err := bls.Sign(sk, msg)
+		if err != nil {
+			log.Fatal(err)
+		}
+		pks[i], sigs[i], msgs[i] = pk, sig, msg
+	}
+
+	ok, err := bls.AggregateVerify(pks, msgs, sigs)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("aggregate valid:", ok)
+}
+```
+
+Swap `NewSigBasic()` for `NewSigAug()` and the duplicate-message restriction disappears, at the cost
+of `PartialSign` gaining a public-key argument.
+
+## Threshold signing
+
+Grounded in `TestBasicPartialSign`. Note there is no DKG here and no interaction between signers:
+`ThresholdKeygen` produces the shares centrally, and each holder signs independently.
+
+<Steps>
+  <Step title="Deal the shares">
+    `ThresholdKeygen(2, 4)` returns one public key plus four `*SecretKeyShare` values. The public
+    key is the ordinary BLS public key for the reconstructed secret — verifiers never learn that
+    threshold signing happened.
+  </Step>
+  <Step title="Sign independently">
+    Each holder calls `PartialSign(share, msg)`. No round trips, no shared state, no per-signature
+    nonce. Partials can be produced years apart.
+  </Step>
+  <Step title="Combine">
+    `CombineSignatures(partials...)` Lagrange-interpolates in the exponent. It rejects fewer than
+    two partials, duplicate share identifiers, and nil entries — but it has no idea what your
+    threshold was, so short-of-threshold input succeeds and yields a wrong signature.
+  </Step>
+  <Step title="Verify normally">
+    The result is an ordinary `*Signature`. `Verify(pk, msg, sig)` accepts it.
+  </Step>
+</Steps>
+
+```go threshold.go
+package main
+
+import (
+	"fmt"
+	"log"
+
+	"github.com/sonr-io/crypto/signatures/bls/bls_sig"
+)
+
+func main() {
+	bls := bls_sig.NewSigBasic()
+
+	// 2-of-4. pk is the ordinary public key for the (never assembled) secret.
+	pk, shares, err := bls.ThresholdKeygen(2, 4)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	msg := []byte("release the funds")
+
+	p1, err := bls.PartialSign(shares[0], msg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	p2, err := bls.PartialSign(shares[2], msg)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	sig, err := bls.CombineSignatures(p1, p2)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	ok, err := bls.Verify(pk, msg, sig)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("threshold signature valid:", ok) // true
+}
+```
+
+`PartialSignature` is the only public-field type in the package:
+
+```go
+type PartialSignature struct {
+	Identifier byte
+	Signature  bls12381.G2 // bls12381.G1 for PartialSignatureVt
+}
+```
+
+Partials are not `BinaryMarshaler`s — if you need to ship them across a wire, serialize the
+identifier and the group element yourself.
+
+## Serialization
+
+Every key, signature, PoP, multi-key, multi-signature, and secret-key share implements
+`encoding.BinaryMarshaler` and `encoding.BinaryUnmarshaler`, using the standard compressed
+[zcash BLS12-381 encoding](https://github.com/zcash/librustzcash/blob/master/pairing/src/bls12_381/README.md#serialization).
+The unmarshalers validate length, reject the all-zero encoding, and check subgroup membership.
+
+```go
+raw, err := pk.MarshalBinary() // 48 bytes for PublicKey, 96 for PublicKeyVt
+
+var restored bls_sig.PublicKey
+err = restored.UnmarshalBinary(raw)
+```
+
+`SecretKey.UnmarshalBinary` requires exactly 32 bytes and rejects all-zero input.
+`SecretKeyShare.UnmarshalBinary` requires exactly 33 and likewise rejects all-zero; the identifier
+is the final byte.
+
+## Caveats
+
+:::danger[Both return values matter]
+`Verify`, `AggregateVerify`, `FastAggregateVerify`, `VerifyMultiSignature`, and `PopVerify` all
+return `(bool, error)`. Writing `if ok, _ := bls.Verify(...); ok` discards a real error, and writing
+`if err == nil` accepts an invalid signature. Check the boolean **and** the error.
+:::
+
+:::warning[`SigBasic` and `SigPop` silently reject duplicate messages]
+`AggregateVerify` returns `(false, nil)` — not an error — when two messages in the batch are byte
+equal. If you are aggregating attestations that legitimately repeat, you want `SigAug`, or you want
+the same-message path (`FastAggregateVerify`) under `SigPop`.
+:::
+
+:::warning[Mixing families does not compile, but mixing ciphersuites does]
+`PublicKeyVt` and `PublicKey` are different types, so the compiler catches G1/G2 mistakes. Nothing
+catches verifying a `SigAug` signature with `NewSigBasic()` — the DSTs differ, so you simply get
+`false`. Store the ciphersuite alongside the key material.
+:::
+
+:::note[Keygen input length]
+`KeygenWithSeed` and `ThresholdKeygenWithSeed` require `len(ikm) >= 32`. Shorter input returns an
+error rather than stretching. An all-zero 32-byte `ikm` is accepted — the HKDF step still produces a
+nonzero scalar — so a zeroed buffer will not fail loudly; it will produce a deterministic, publicly
+derivable key.
+:::
+
+:::danger[`CombineSignatures` does not enforce your threshold]
+`combineSigs` only checks that it received between 2 and 255 distinct, subgroup-valid partials. It
+never learns the `threshold` you passed to `ThresholdKeygen`, so combining 2 partials of a 3-of-5
+key returns a perfectly well-formed `*Signature` with `err == nil` that simply fails verification.
+If your application distinguishes "not enough signers yet" from "a signer cheated", count the
+partials yourself before combining.
+:::
+
+:::warning[`KeygenWithSeed` mutates the slice you hand it]
+Key derivation does `ikm = append(ikm, 0)` before the HKDF call. When your `ikm` slice has spare
+capacity — for example a sub-slice of a larger buffer — that append writes a zero byte into the
+backing array past `len(ikm)`, clobbering whatever lived there. Pass a slice whose length equals its
+capacity, or a fresh copy.
+:::
+
+:::note[Nil versus empty messages]
+`SigBasic.Sign` and `SigPop.Sign` accept an empty non-nil slice but reject `nil`. `SigAug.Sign`
+rejects both, because it checks `len(msg) == 0`. `PartialSign` rejects both in every scheme, for the
+same reason — so a message that a full `Sign` accepts may be refused by the threshold path.
+:::
+
+:::note[Key derivation detail]
+`Generate` follows draft-04's KeyGen: `salt = SHA-256("BLS-SIG-KEYGEN-SALT-")`, then
+`HKDF-SHA256(ikm || 0x00, salt, info = I2OSP(48, 2))`, read 48 bytes, byte-reversed, reduced mod the
+subgroup order. It does not implement the salt-rehashing loop from later drafts, so a zero result
+would be returned rather than retried — an outcome with negligible probability, but not one the code
+guards against.
+:::
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Secret sharing" href="/threshold/secret-sharing" icon="split">
+    Shamir, Feldman, and Pedersen sharing — the general machinery behind `ThresholdKeygen`.
+  </Card>
+  <Card title="Distributed key generation" href="/threshold/dkg" icon="users">
+    When no single party may ever hold the whole secret, even at dealing time.
+  </Card>
+  <Card title="Accumulator" href="/zero-knowledge/accumulator" icon="layers">
+    The other pairing-based primitive in this library, also on BLS12-381.
+  </Card>
+  <Card title="Security notes" href="/reference/security" icon="shield">
+    Known defects and unaudited paths across the library.
+  </Card>
+</CardGroup>

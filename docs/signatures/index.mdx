@@ -1,0 +1,179 @@
+---
+title: Signatures
+description: Choosing between BLS aggregation, BBS+ selective disclosure, ECDSA canonicalization, verifiable random functions, and the chain-specific Schnorr variants.
+sidebar:
+  order: 1
+  icon: pen-tool
+---
+
+Five very different things live under this heading, and they are not interchangeable. Before you
+pick one, decide which property you actually need: **aggregation** (many signatures collapse into
+one), **selective disclosure** (a holder proves a subset of signed attributes), **determinism and
+canonical encoding** (the same message always yields the same bytes), **verifiable randomness** (an
+output nobody can predict but everybody can check), or **wire compatibility with a specific
+blockchain**.
+
+Every package here is a distinct construction with its own key type. There is no shared `Signer`
+interface across them, and keys from one scheme are never valid in another.
+
+## Pick a scheme
+
+| Goal | Package | Page |
+| --- | --- | --- |
+| Collapse N signatures over N messages into one 96-byte object | `signatures/bls/bls_sig` | [BLS](/signatures/bls) |
+| Multi-signature: N signers, one message, one aggregate check | `signatures/bls/bls_sig` (`SigPop`) | [BLS](/signatures/bls) |
+| Split a signing key into `t`-of-`n` shares with no interaction | `signatures/bls/bls_sig` | [BLS](/signatures/bls) |
+| Sign a vector of attributes; let the holder reveal only some | `signatures/bbs` | [BBS+](/signatures/bbs) |
+| Issue a credential over messages the issuer must not see | `signatures/bbs` | [BBS+](/signatures/bbs) |
+| Kill ECDSA signature malleability before storing or comparing | `ecdsa` | [ECDSA utilities](/signatures/ecdsa) |
+| Sign with ECDSA without depending on runtime entropy | `ecdsa` | [ECDSA utilities](/signatures/ecdsa) |
+| Unpredictable-but-verifiable per-message output (leader election, lotteries) | `vrf` | [VRF](/signatures/vrf) |
+| Sign a Mina payment or delegation transaction | `signatures/schnorr/mina` | [Chain schemes](/signatures/chain-schemes) |
+| Produce a NEM/Symbol Keccak-flavoured Ed25519 signature | `signatures/schnorr/nem` | [Chain schemes](/signatures/chain-schemes) |
+
+Some adjacent things are documented elsewhere:
+
+- The **interactive Schnorr proof of knowledge** (`zkp/schnorr`) is a ZKP, not a signature scheme —
+  see [zero-knowledge/schnorr](/zero-knowledge/schnorr).
+- **Threshold ECDSA** and **threshold Ed25519** (FROST) produce ordinary ECDSA / Ed25519 signatures
+  from distributed shares — see [threshold ECDSA](/threshold/threshold-ecdsa) and
+  [threshold Ed25519](/threshold/threshold-ed25519). BLS threshold signing on this page is a
+  different, much simpler construction: it needs no rounds of interaction.
+
+## What these packages assume about curves
+
+`signatures/bbs` and the Mina scheme are written against the
+[`core/curves`](/foundations/curves) `Curve` / `Point` / `Scalar` abstraction — BBS+ specifically
+requires a `*curves.PairingCurve` (`curves.BLS12381(...)`). `signatures/bls/bls_sig` bypasses the
+abstraction entirely and calls the low-level `core/curves/native/bls12381` backend directly, so it
+is hard-wired to BLS12-381. The `ecdsa` package operates on stdlib `crypto/ecdsa` and
+`crypto/elliptic` types, and `vrf` on a vendored Edwards25519 implementation.
+
+## The shared proof toolkit: `signatures/common`
+
+`signatures/common` holds the sigma-protocol plumbing that BBS+ (and code composing proofs with
+BBS+) builds on. It is a building-block package — you rarely import it alone, but you will import it
+to construct BBS+ proof messages.
+
+| Symbol | Kind | Purpose |
+| --- | --- | --- |
+| `Challenge` | `= curves.Scalar` | Fiat-Shamir challenge value |
+| `Commitment` | `= curves.Point` | Pedersen commitment to one or more scalars |
+| `Nonce` | `= curves.Scalar` | Freshness / replay protection in a proof |
+| `SignatureBlinding` | `= curves.PairingScalar` | Blinding factor for blind signing |
+| `HmacDrbg` | struct | HMAC deterministic random bit generator, any hash, auto-reseeding |
+| `ProofCommittedBuilder` | struct | Accumulates `(point, scalar)` commitments into Schnorr proofs |
+| `ProofMessage` | interface | Classifies a signed message as revealed or hidden |
+
+The four aliases are Go **type aliases**, not defined types: a `common.Nonce` *is* a
+`curves.Scalar`, so no conversion is needed and the compiler will not stop you passing a challenge
+where a nonce belongs. Treat the names as documentation, not as type safety.
+
+### `ProofMessage` and its three implementations
+
+`ProofMessage` is how a BBS+ prover declares, per message, whether it is disclosed:
+
+```go
+type ProofMessage interface {
+	IsHidden() bool
+	GetBlinding(reader io.Reader) curves.Scalar
+	GetMessage() curves.Scalar
+}
+```
+
+<TypeTable
+  type={{
+    RevealedMessage: {
+      type: "struct { Message curves.Scalar }",
+      description: "IsHidden() == false. The verifier learns this message. GetBlinding returns nil.",
+    },
+    ProofSpecificMessage: {
+      type: "struct { Message curves.Scalar }",
+      description: "IsHidden() == true. A fresh random blinding factor is drawn from the reader, used only by this proof.",
+    },
+    SharedBlindingMessage: {
+      type: "struct { Message, Blinding curves.Scalar }",
+      description: "IsHidden() == true, but you supply the blinding factor so the same hidden value can be linked across several proofs (e.g. a BBS+ proof plus a range proof over the same attribute).",
+    },
+  }}
+/>
+
+### `ProofCommittedBuilder`
+
+A small accumulator for Schnorr-style proofs of knowledge of a linear combination:
+
+```go
+import "github.com/sonr-io/crypto/signatures/common"
+
+builder := common.NewProofCommittedBuilder(curve)
+_ = builder.CommitRandom(basePoint, crand.Reader) // blinding for a secret you know
+_ = builder.Commit(otherPoint, knownScalar)       // fixed scalar
+
+bytes := builder.GetChallengeContribution() // feed into your transcript
+proofs, err := builder.GenerateProof(challenge, secrets)
+```
+
+`GetChallengeContribution` returns the compressed encoding of `SumOfProducts(points, scalars)` — the
+aggregate commitment. `GenerateProof` then returns one response scalar per commitment, computed as
+`secret*challenge + blinding`, and errors if `len(secrets)` does not match the number of
+commitments. `Get(index)` retrieves the `(point, scalar)` pair at a position, returning `(nil, nil)`
+out of range. The builder caps out at roughly 65535 commitments.
+
+### `HmacDrbg`
+
+```go
+drbg := common.NewHmacDrbg(entropy, nonce, personalization, sha256.New)
+buf := make([]byte, 64)
+_, _ = drbg.Read(buf)
+drbg.Reseed(moreEntropy)
+```
+
+It satisfies `io.Reader`, so it can be handed to any API here that takes a `reader` — which is how
+you make an otherwise randomised proof reproducible in a test.
+
+:::warning[These are internal building blocks]
+`signatures/common` carries no package-level documentation and no tests of its own; it is exercised
+only indirectly through `signatures/bbs`. If you use `ProofCommittedBuilder` to build a *new*
+protocol rather than to compose with BBS+, you are on your own for soundness — nothing in this
+repository validates that usage.
+:::
+
+## Caveats that apply across this section
+
+:::danger[No audit, and no uniform error discipline]
+None of these packages has a published security audit. They also differ in how they report failure:
+BLS returns `(bool, error)` and you must check **both**; BBS+ `Verify` returns a plain `error`;
+`PokSignatureProof.Verify` returns a bare `bool`; the VRF `Verify` returns a bare `bool`. Copying an
+error-handling idiom from one page to another will silently drop failures. See
+[security notes](/reference/security).
+:::
+
+:::note
+Serialization is `encoding.BinaryMarshaler` / `BinaryUnmarshaler` throughout, but several types
+(BBS+ `Signature`, `PokSignatureProof`, `BlindSignature`, `BlindSignatureContext`) need an
+`Init(curve)` call before `UnmarshalBinary`, because the wire format does not name its curve.
+:::
+
+## Where to next
+
+<CardGroup cols={2}>
+  <Card title="BLS" href="/signatures/bls" icon="combine">
+    Two instantiations, three ciphersuites, aggregation, multi-signatures, and non-interactive
+    threshold keygen on BLS12-381.
+  </Card>
+  <Card title="BBS+" href="/signatures/bbs" icon="eye-off">
+    Sign a vector of attributes, then prove possession while revealing only the ones you choose.
+  </Card>
+  <Card title="ECDSA utilities" href="/signatures/ecdsa" icon="check-check">
+    Malleability, canonical low-S form, fixed-width codecs, and deterministic nonce derivation.
+  </Card>
+  <Card title="VRF" href="/signatures/vrf" icon="dice-5">
+    Verifiable pseudorandom outputs over Edwards25519 with SHAKE256.
+  </Card>
+  <Card title="Chain schemes" href="/signatures/chain-schemes" icon="link">
+    Mina Schnorr over Pallas/Poseidon and NEM's Keccak-512 Ed25519 variant.
+  </Card>
+  <Card title="Curve abstraction" href="/foundations/curves" icon="git-branch">
+    The `Curve` / `Point` / `Scalar` triple that BBS+ and the Mina scheme are generic over.
+  </Card>
+</CardGroup>

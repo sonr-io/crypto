@@ -1,0 +1,431 @@
+---
+title: Paillier
+description: Additively homomorphic public-key encryption over a composite modulus, plus the PSF proof that a Paillier modulus is square-free — the check that keeps a malformed key from breaking protocols above it.
+sidebar:
+  label: Paillier
+  order: 5
+  icon: calculator
+---
+
+`paillier` implements Paillier's 1999 cryptosystem. Its package doc cites the original paper —
+*Public-Key Cryptosystems Based on Composite Degree Residuosity Class* — and states that all
+routines follow the pseudocode of §2.5, Fig. 1. Unlike everything else in this section it is
+not built on `core/curves`: plaintexts, ciphertexts, and keys are all `*math/big.Int` values
+modulo a composite `N = PQ`.
+
+It is here rather than under encryption because of what it is *used for*. Paillier's value in
+this module is that a party can compute on data it cannot read, which is the multiplication
+primitive underpinning several MPC protocols — and the accompanying `PsfProof` is a
+zero-knowledge proof about the public key itself.
+
+## Additively homomorphic, and only additively
+
+Two operations work on ciphertexts:
+
+| Operation | Call | Plaintext effect | Implementation |
+| --- | --- | --- | --- |
+| Ciphertext + ciphertext | `pk.Add(c, d)` | `Dec(result) = a + b` | `c · d mod N²` |
+| Known scalar × ciphertext | `pk.Mul(a, c)` | `Dec(result) = a · b` | `c^a mod N²` |
+
+That is the whole homomorphic surface, and the boundary is hard:
+
+:::danger[You cannot multiply two ciphertexts' plaintexts]
+There is no operation, and no combination of the available operations, that takes `Enc(a)`
+and `Enc(b)` and produces `Enc(a·b)`. Paillier is additively homomorphic — a group
+homomorphism from addition mod `N` to multiplication mod `N²`, nothing more. `pk.Mul` takes a
+*plaintext* `*big.Int` as its first argument, not a second ciphertext; its name refers to
+multiplying the plaintext by a known constant.
+
+If you need ciphertext-ciphertext multiplication you need a different primitive — a
+fully-homomorphic scheme, or an interactive multiplication protocol such as the
+oblivious-transfer-based multiplier in this repo. See
+[Oblivious transfer](/threshold/oblivious-transfer).
+:::
+
+Note also that both operands must be in range. `Add` requires `c, d ∈ Z_N²`; `Mul` requires
+`a ∈ Z_N` and `c ∈ Z_N²`. In particular `a` must be non-negative and less than `N` — you
+cannot pass a negative scalar to subtract. To subtract, add the modular negation
+`new(big.Int).Sub(pk.N, x)`.
+
+## Keys
+
+<TypeTable
+  type={{
+    "NewKeys": {
+      type: "func() (*PublicKey, *SecretKey, error)",
+      required: true,
+      description: "Generates a fresh keypair with two PaillierPrimeBits-sized safe primes. Slow: see the note below.",
+    },
+    "NewSecretKey": {
+      type: "func(p, q *big.Int) (*SecretKey, error)",
+      required: true,
+      description: "Derives lambda, totient, and U from primes you supply. Performs no primality or safety check on p and q.",
+    },
+    "NewPubkey": {
+      type: "func(n *big.Int) (*PublicKey, error)",
+      required: true,
+      description: "Wraps a modulus received from a counterparty and caches N².",
+    },
+    "PaillierPrimeBits": {
+      type: "int constant = 1024",
+      required: true,
+      description: "Bit size of each safe prime, so N is 2048 bits. Not configurable through the exported API.",
+    },
+  }}
+/>
+
+`PublicKey` exposes `N` (the modulus) and `N2` (`N²`, cached to avoid recomputation).
+`SecretKey` embeds `PublicKey` and adds:
+
+<TypeTable
+  type={{
+    Lambda: {
+      type: "*big.Int",
+      required: true,
+      description: "lcm(P-1, Q-1), the decryption exponent.",
+    },
+    Totient: {
+      type: "*big.Int",
+      required: true,
+      description: "Euler's totient (P-1)(Q-1). Used by the PSF proof, not by decryption.",
+    },
+    U: {
+      type: "*big.Int",
+      required: true,
+      description: "L((N+1)^lambda mod N²)^-1 mod N, the precomputed decryption multiplier.",
+    },
+  }}
+/>
+
+Both key types implement `MarshalJSON`/`UnmarshalJSON`. `PublicKeyJson` and `SecretKeyJson`
+are the exported-but-internal wire shapes. `P` and `Q` are **not** retained on the secret key
+and are not serialized — only the derived values are, so you cannot recover the factors from a
+marshalled `SecretKey`.
+
+`Ciphertext` is a defined type over `*big.Int`, so it serializes as an integer with no
+wrapper.
+
+:::note[NewKeys is slow, by construction]
+`NewKeys` calls `core.GenerateSafePrime` twice at 1024 bits. A safe prime `p` requires
+`(p-1)/2` to also be prime, which makes them rare — safe-prime search is orders of magnitude
+slower than ordinary prime generation, and the cost is highly variable run to run. Generate
+keys once at setup and persist them; never generate inside a request path. `NewKeys` is the
+only function in the package that performs a search — everything else is a bounded number of
+modular operations.
+:::
+
+:::warning[NewSecretKey trusts its inputs completely]
+`NewSecretKey(p, q)` computes `lcm(p-1, q-1)`, `(p-1)(q-1)`, `N`, `N²`, and `U` and returns.
+It does not test whether `p` and `q` are prime, whether they are safe primes, whether they are
+distinct, or whether they are large enough. Passing composites yields a key whose `Decrypt`
+returns garbage without error. It exists so that callers with pre-generated primes (and the
+package's own tests) can skip the expensive search — not as a general constructor.
+:::
+
+## Encryption
+
+`Encrypt` returns **three** values, and the middle one is easy to discard by accident:
+
+```go
+func (pk *PublicKey) Encrypt(msg *big.Int) (Ciphertext, *big.Int, error)
+```
+
+The second return is `r`, the randomness the ciphertext was built with. Internally
+`c = (N+1)^msg · r^N mod N²`, where `r` is drawn uniformly from `Z_N` and rejected if zero.
+
+You need to keep `r` whenever a later step must prove something about *this* ciphertext.
+`r` and `msg` together are the witness for essentially every zero-knowledge statement about a
+Paillier ciphertext ("this encrypts a value in range", "these two ciphertexts encrypt the same
+value", "this encrypts the plaintext behind that commitment"). Without `r` you cannot produce
+such a proof and cannot recompute the ciphertext deterministically. If you are only encrypting
+and never proving, discard it with `_`.
+
+```go paillier.go
+package main
+
+import (
+	"fmt"
+	"math/big"
+
+	"github.com/sonr-io/crypto/paillier"
+)
+
+func main() {
+	// One-time, slow: two 1024-bit safe primes.
+	pk, sk, err := paillier.NewKeys()
+	if err != nil {
+		panic(err)
+	}
+
+	a := big.NewInt(1234)
+	b := big.NewInt(5678)
+
+	// The second return is the encryption randomness r. Keep it if you will
+	// later need to prove a statement about this ciphertext.
+	ca, ra, err := pk.Encrypt(a)
+	if err != nil {
+		panic(err)
+	}
+	_ = ra
+
+	cb, _, err := pk.Encrypt(b)
+	if err != nil {
+		panic(err)
+	}
+
+	// Add plaintexts by multiplying ciphertexts.
+	csum, err := pk.Add(ca, cb)
+	if err != nil {
+		panic(err)
+	}
+	sum, err := sk.Decrypt(csum)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(sum) // 6912
+
+	// Scale a plaintext by a known constant.
+	cscaled, err := pk.Mul(big.NewInt(3), ca)
+	if err != nil {
+		panic(err)
+	}
+	scaled, err := sk.Decrypt(cscaled)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(scaled) // 3702
+
+	// A counterparty that only received N can encrypt but not decrypt.
+	remote, err := paillier.NewPubkey(pk.N)
+	if err != nil {
+		panic(err)
+	}
+	_, _, _ = remote.Encrypt(big.NewInt(1))
+}
+```
+
+Plaintexts must satisfy `msg ∈ Z_N`. Arithmetic wraps modulo `N`, so a sum of two large
+plaintexts that exceeds `N` decrypts to the reduced value, not the integer sum. If you are
+encoding signed or fixed-point quantities, choose a representation with headroom and check it
+yourself — the package does not.
+
+## The PSF proof: proving a modulus is square-free
+
+A protocol that accepts a Paillier public key from an untrusted party accepts an arbitrary
+integer `N`. If `N` is malformed — not square-free, or sharing a factor with the ambient group
+order — the homomorphic structure the protocol relies on breaks down, and a malicious key
+holder can extract information or force a decryption to a value of its choosing. The PSF
+(Paillier square-free) proof forces `N` to be well-formed before anything is encrypted under it.
+
+The implementation cites its spec as `[spec] §10.2` and `fig. 15` (`ProvePSF`, `VerifyPSF`),
+and the source carries explicit notes where it deviates from that pseudocode to fix errors in
+it — the modulus for the exponentiation in step 5, and the inclusion of `N` in the challenge
+commitment.
+
+### What it actually asserts
+
+The prover, who knows the factorization, computes `M = N⁻¹ mod φ(N)` and returns
+`y_i = x_i^M mod N` for 13 deterministically derived challenges `x_i`. The verifier checks
+`y_i^N ≡ x_i mod N` for every `i`.
+
+That check passes for all `i` only if raising to the `N`-th power is a bijection on `Z_N`,
+which holds exactly when `gcd(N, φ(N)) = 1` — that is, when `N` is **square-free**. The
+verifier additionally rejects `N` if the curve subgroup order `q` divides `N`.
+
+Be precise about the limits of this:
+
+- It proves `N` is square-free.
+- It does **not** prove `N` is a product of exactly two primes.
+- It does **not** prove the factors are safe primes, or of equal size, or large.
+- It does **not** prove the prover knows the factorization beyond what square-freeness needs.
+
+If your protocol needs a biprime or safe-prime guarantee, PSF alone is insufficient.
+
+<TypeTable
+  type={{
+    "PsfProofParams.Prove": {
+      type: "func() (PsfProof, error)",
+      required: true,
+      description: "Returns 13 big.Ints. Errors with ErrNilArguments if Curve, SecretKey, or Y is nil, or if Pi is zero.",
+    },
+    "PsfProof.Verify": {
+      type: "func(psf *PsfVerifyParams) error",
+      required: true,
+      description: "Returns nil on success. Same nil/zero argument validation as Prove.",
+    },
+    "PsfProofLength": {
+      type: "int constant = 13",
+      required: true,
+      description: "The number of challenges, and therefore the exact length of a valid PsfProof.",
+    },
+  }}
+/>
+
+`PsfProof` is `[]*big.Int`, so `encoding/json` round-trips it directly with no custom codec —
+`psf_test.go` marshals and unmarshals it that way.
+
+### Parameters
+
+The prover's and verifier's parameter structs are deliberately near-identical: the only
+difference is that the prover holds the `*SecretKey` while the verifier holds only the
+`*PublicKey`. Every other field is a public value both sides must agree on, because all three
+are hashed into the challenge derivation.
+
+<TypeTable
+  type={{
+    Curve: {
+      type: "elliptic.Curve",
+      required: true,
+      description: "A crypto/elliptic curve — not a core/curves one. Its Params() supply the generator and subgroup order for challenge derivation. Tests use btcec.S256() and elliptic.P256().",
+    },
+    SecretKey: {
+      type: "*SecretKey",
+      required: true,
+      description: "Prover only (PsfProofParams). Supplies N and Totient for computing M.",
+    },
+    PublicKey: {
+      type: "*PublicKey",
+      required: true,
+      description: "Verifier only (PsfVerifyParams). Supplies N.",
+    },
+    Pi: {
+      type: "uint32",
+      required: true,
+      description: "Party index bound into the challenges. Must be non-zero — zero is rejected as a nil argument on both sides.",
+    },
+    Y: {
+      type: "*curves.EcPoint",
+      required: true,
+      description: "A public point bound into the challenges, tying the proof to a protocol-specific value.",
+    },
+  }}
+/>
+
+### Prove and verify
+
+Grounded in `paillier/psf_test.go` (`TestPsfProofWorks`).
+
+```go psf.go
+package main
+
+import (
+	"crypto/elliptic"
+	"fmt"
+	"math/big"
+
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/paillier"
+)
+
+// Y is an ordinary EC point. In psf_test.go it is built with
+// curves.NewScalarBaseMult over the same crypto/elliptic curve.
+func bindingPoint(k *big.Int) (*curves.EcPoint, error) {
+	return curves.NewScalarBaseMult(elliptic.P256(), k)
+}
+
+func provePSF(sk *paillier.SecretKey, pi uint32, y *curves.EcPoint) (paillier.PsfProof, error) {
+	return (&paillier.PsfProofParams{
+		Curve:     elliptic.P256(),
+		SecretKey: sk,
+		Pi:        pi, // must be non-zero
+		Y:         y,
+	}).Prove()
+}
+
+func verifyPSF(
+	proof paillier.PsfProof,
+	pk *paillier.PublicKey,
+	pi uint32,
+	y *curves.EcPoint,
+) error {
+	// Do this length check yourself: Verify does not, and indexes 13 elements.
+	if len(proof) != paillier.PsfProofLength {
+		return fmt.Errorf(
+			"malformed psf proof: want %d elements, got %d",
+			paillier.PsfProofLength, len(proof),
+		)
+	}
+	return proof.Verify(&paillier.PsfVerifyParams{
+		Curve:     elliptic.P256(),
+		PublicKey: pk,
+		Pi:        pi,
+		Y:         y,
+	})
+}
+```
+
+Wiring it into a key exchange:
+
+<Steps>
+  <Step title="Generate once">
+    Each party runs `paillier.NewKeys()` at setup and persists the keypair.
+  </Step>
+  <Step title="Agree on the binding values">
+    Both sides fix the `elliptic.Curve`, the non-zero party index `Pi`, and the public point
+    `Y` from protocol state. A mismatch in any of the three produces different challenges and
+    a failed verification.
+  </Step>
+  <Step title="Publish key plus proof">
+    Send `pk.N` (via `MarshalJSON`) together with the 13-element `PsfProof`.
+  </Step>
+  <Step title="Verify before use">
+    The receiver rebuilds the public key with `paillier.NewPubkey(n)`, checks the proof length,
+    calls `proof.Verify(...)`, and only then encrypts anything under that key.
+  </Step>
+</Steps>
+
+## Caveats
+
+:::danger[Verify panics on a short proof]
+`PsfProof.Verify` validates that the *challenge* array has length `PsfProofLength`, but never
+checks `len(p)` — the proof itself. It then indexes `p[j]` for `j` in `0..12`. A proof shorter
+than 13 elements — for instance one decoded from attacker-supplied JSON — panics inside
+`Verify` instead of returning an error. A three-element proof produces
+`runtime error: index out of range [3] with length 3`.
+
+Check `len(proof) == paillier.PsfProofLength` yourself immediately after deserialization,
+before calling `Verify`. This is unconditional: any code path where the proof arrives from
+outside your process needs the guard.
+:::
+
+:::warning[The proof does not authenticate the sender]
+`Pi` and `Y` bind the proof to a protocol position and a public point, but the PSF proof is not
+a signature over `N`. A relayed valid `(N, proof)` pair from an honest party remains valid.
+If you need to know *who* sent a modulus, authenticate the transport or sign the key material
+separately.
+:::
+
+:::warning[Constant-time behaviour is partial]
+Some paths use constant-time helpers — `Add` and `Mul` accumulate their two range-check errors
+before branching, and `encrypt` uses `core.ConstantTimeEq` to reject a zero nonce. Others are
+plain `math/big` operations, and `math/big` is not constant-time. Do not treat this package as
+side-channel hardened. No timing analysis of this code exists in the repository.
+:::
+
+:::note[No key-size configurability, and no key validation on import]
+`NewKeys` is hardcoded to `PaillierPrimeBits = 1024` per prime; the parameterised generator is
+unexported. `NewPubkey(n)` accepts any modulus you hand it — it caches `N²` and returns. It
+performs no size check, no square-free check, and no primality-related check. Validating an
+imported modulus is exactly what the PSF proof is for, and it is your responsibility to run it.
+:::
+
+:::info[Decryption does not authenticate]
+Paillier is not an authenticated encryption scheme. `Decrypt` will happily return a plaintext
+for any `c ∈ Z_N²`, including one an adversary derived homomorphically from a ciphertext you
+sent. There is no integrity tag. If you need to know that a ciphertext is the one you expected,
+you need an additional proof or a MAC over a separate channel. For authenticated symmetric
+encryption see [AEAD](/symmetric/aead).
+:::
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Arithmetic" href="/foundations/arithmetic" icon="binary">
+    The `core` modular-arithmetic layer this package is built on — `Inv`, `Exp`, `Mul`, `In`,
+    `Rand`, and safe-prime generation.
+  </Card>
+  <Card title="Oblivious transfer" href="/threshold/oblivious-transfer" icon="shuffle">
+    The interactive multiplication primitive this module actually uses where Paillier's
+    additive-only homomorphism is not enough.
+  </Card>
+</CardGroup>

@@ -1,0 +1,196 @@
+---
+title: ECIES
+description: Encrypt a payload to a secp256k1 public key. A thin wrapper over github.com/ecies/go/v2 with one significant seed hazard.
+sidebar:
+  order: 5
+  icon: mail
+---
+
+`github.com/sonr-io/crypto/ecies` is a **thin wrapper** — three files, 70 lines of code — over
+[`github.com/ecies/go/v2`](https://github.com/ecies/go). ECIES (Elliptic Curve Integrated Encryption
+Scheme) is hybrid public-key encryption: the sender generates an ephemeral keypair, does ECDH against
+the recipient's static public key, derives a symmetric key, and encrypts the payload under an AEAD.
+The recipient needs no prior interaction — just their own private key and the ciphertext.
+
+**Reach for this when** you need to encrypt a payload to a public key you already have, with no
+handshake and no shared state.
+
+**Do not reach for this when** you need forward secrecy for the recipient, authenticated sender
+identity (ECIES gives you confidentiality, not sender authentication — sign separately with
+[`mpc`](/identity/mpc-enclave) or an [ECDSA](/signatures/ecdsa) key), or a symmetric key you already
+share (use [AEAD](/symmetric/aead) directly).
+
+## The API surface
+
+```go
+type PrivateKey = eciesgo.PrivateKey // type ALIAS, not a wrapper struct
+type PublicKey  = eciesgo.PublicKey  // type ALIAS
+
+func GenerateKey() (*PrivateKey, error)
+func GenerateKeyFromSeed(seed []byte) (*PrivateKey, error)
+func HashSeed(seed []byte) []byte
+
+func Encrypt(pub *PublicKey, plaintext []byte) ([]byte, error)
+func Decrypt(priv *PrivateKey, ciphertext []byte) ([]byte, error)
+```
+
+That is the entire package. `Encrypt` and `Decrypt` are one-line forwards to `eciesgo.Encrypt` and
+`eciesgo.Decrypt`.
+
+:::note[The key types are aliases, so the upstream API is yours]
+`PrivateKey` and `PublicKey` are Go **type aliases** (`type PrivateKey = eciesgo.PrivateKey`), not
+distinct named types. Everything the upstream library defines on those types is directly available:
+`priv.Bytes()`, `priv.Hex()`, `priv.PublicKey`, `priv.ECDH(pub)`, `pub.Bytes(compressed bool)`,
+`pub.Hex(compressed bool)`, `eciesgo.NewPrivateKeyFromHex`, `eciesgo.NewPublicKeyFromBytes`, and so
+on.
+
+Consult [`github.com/ecies/go/v2`](https://github.com/ecies/go) for:
+
+- **key serialization** — this package exposes no marshal/unmarshal helpers of its own;
+- **the ciphertext wire format** — the ephemeral-key encoding, KDF and AEAD choices are entirely
+  upstream's, and are not restated or pinned here.
+:::
+
+## Curve
+
+`GenerateKey` and `GenerateKeyFromSeed` both build their key on `curves.SP256()`, which returns
+`ecc.P256k1()` from `github.com/dustinxie/ecc` — i.e. **secp256k1**, the same curve as
+[`mpc`](/identity/mpc-enclave) and secp256k1 `did:key` identifiers. See
+[Foundations → Curves](/foundations/curves) for the curve abstraction.
+
+Note the constructors bypass `eciesgo.GenerateKey` and assemble the struct by hand from
+`ecdsa.GenerateKey(curve, rand.Reader)`:
+
+```go
+p, err := ecdsa.GenerateKey(curve, rand.Reader)
+return &PrivateKey{
+	PublicKey: &PublicKey{Curve: curve, X: p.X, Y: p.Y},
+	D:         p.D,
+}, nil
+```
+
+## Usage
+
+```go ecies_roundtrip.go
+package main
+
+import (
+	"fmt"
+
+	"github.com/sonr-io/crypto/ecies"
+)
+
+func main() {
+	// Recipient generates a keypair and publishes the public key.
+	priv, err := ecies.GenerateKey()
+	if err != nil {
+		panic(err)
+	}
+
+	// Sender encrypts to the public key. No prior interaction needed.
+	ciphertext, err := ecies.Encrypt(priv.PublicKey, []byte("hello"))
+	if err != nil {
+		panic(err)
+	}
+
+	// Recipient decrypts with the private key.
+	plaintext, err := ecies.Decrypt(priv, ciphertext)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(string(plaintext)) // hello
+}
+```
+
+`GenerateKey` is grounded in `TestGenerateKey` and `GenerateKeyFromSeed` in `TestGenerateFromSeed`
+(`ecies/keys_test.go`). The encrypt/decrypt round trip above is **not** covered by any test in the
+package — see the caveats.
+
+## `HashSeed` and seeded keys
+
+`HashSeed(seed []byte) []byte` is `blake3.Sum512(seed)` from `lukechampine.com/blake3`, returned as a
+64-byte slice. Its purpose is to stretch an arbitrary-length input up to enough bytes for
+`GenerateKeyFromSeed`, which reads from the seed as an entropy source:
+
+```go
+seed := ecies.HashSeed([]byte("some high-entropy passphrase or master secret"))
+priv, err := ecies.GenerateKeyFromSeed(seed)
+```
+
+:::note[The seed is key material]
+`GenerateKeyFromSeed` treats its argument as the sole entropy input. Whoever holds the seed can
+recompute the private key. Store, transmit and destroy a seed exactly as you would a private key —
+and note that `HashSeed` is a plain hash, **not** a password KDF: it has no salt, no work factor and
+no memory hardness. Do not feed it a human-chosen password. For password-derived keys use a real KDF
+from [Key Derivation](/symmetric/key-derivation).
+:::
+
+:::danger[`GenerateKeyFromSeed` is not deterministic]
+Despite the name, this function does not reliably produce the same key from the same seed on current
+Go toolchains. `ecdsa.GenerateKey(curve, bytes.NewReader(seed))` passes the seed reader into
+`crypto/ecdsa`, but the standard library does not use it as given:
+
+- On Go 1.26 and later, `crypto/ecdsa` routes a caller-supplied reader through
+  `crypto/internal/rand.CustomReader`, which **returns the system CSPRNG and discards the supplied
+  reader** unless the `GODEBUG` setting `cryptocustomrand=1` is active. The `cryptocustomrand`
+  default became `0` in Go 1.26, so a program whose main module declares `go 1.26` or later gets a
+  fully random key and the seed is ignored entirely.
+- Under the older behaviour (`cryptocustomrand=1`, i.e. a main module declaring an earlier Go
+  version), `randutil.MaybeReadByte` consumes a byte from the reader with roughly 50% probability
+  before key generation, which shifts the whole byte stream. Measured against this package: 20
+  successive calls with an identical seed produced the same private key only **13 times out of 20**.
+
+Both behaviours were confirmed empirically against this package on Go 1.27.
+
+`ecies/keys_test.go`'s `TestGenerateFromSeed` calls `GenerateKeyFromSeed` twice with the same seed
+but only asserts that neither call errors — it never compares the two keys, which is why the defect
+is not caught.
+
+**Do not use `GenerateKeyFromSeed` for deterministic key derivation.** If you need a key
+reproducible from a seed, derive the scalar yourself with a KDF from
+[Key Derivation](/symmetric/key-derivation) and construct the key from those bytes via
+`eciesgo.NewPrivateKeyFromBytes`.
+:::
+
+## Caveats
+
+:::warning[`GenerateKeyFromSeed` errors on a short seed]
+The implementation slices `seed[:]` and hands it to `bytes.NewReader`. `randFieldElement` then calls
+`io.ReadFull`, which returns `io.ErrUnexpectedEOF` on a seed shorter than 32 bytes — surfaced as
+`"cannot generate key pair: unexpected EOF"`. A `nil` seed is worse: `seed[:]` on a nil slice is
+legal, so you get the same EOF error rather than a clear "nil seed" message. Always pass
+`HashSeed(...)` output (64 bytes) rather than a raw seed. Under the Go 1.26+ behaviour described
+above the reader is never consulted, so short seeds succeed there — which makes the failure mode
+toolchain-dependent.
+:::
+
+:::warning[No round-trip test]
+`ecies/keys_test.go` is 24 lines and contains two tests: `TestGenerateKey` and
+`TestGenerateFromSeed`. **Neither `Encrypt` nor `Decrypt` is tested at all**, and there is no test
+that the hand-assembled `PrivateKey`/`PublicKey` structs are accepted by the upstream library. The
+round trip does work — it was verified directly against this package — but the package ships no
+regression coverage for its two most important functions.
+:::
+
+:::info[No authentication of the sender]
+ECIES ciphertext is confidential and integrity-protected against tampering, but **anyone** with the
+recipient's public key can produce a valid ciphertext. If the recipient needs to know who sent a
+message, sign the plaintext (or the ciphertext) separately and transmit the signature alongside it.
+:::
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="AEAD" href="/symmetric/aead" icon="lock">
+    The symmetric layer, for when you already share a key.
+  </Card>
+  <Card title="Key Derivation" href="/symmetric/key-derivation" icon="git-branch">
+    Real KDFs, for deriving keys from seeds or passwords.
+  </Card>
+  <Card title="MPC Enclave" href="/identity/mpc-enclave" icon="shield">
+    Signing, to pair with encryption for sender authentication.
+  </Card>
+  <Card title="Curves" href="/foundations/curves" icon="binary">
+    The secp256k1 curve this package builds on.
+  </Card>
+</CardGroup>

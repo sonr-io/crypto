@@ -1,0 +1,341 @@
+---
+title: Key Derivation
+description: Argon2id password stretching with exact preset parameters and PHC hash encoding, plus the subtle package's HKDF, hash/curve name mapping, and X25519 ECDH.
+sidebar:
+  order: 4
+  icon: key-round
+---
+
+Two packages, two different jobs, and picking the wrong one is the most common mistake in this layer.
+
+- **`argon2`** takes a *low-entropy* secret — a human password — and spends deliberate time and memory turning it into key material. Use it when a human typed the input.
+- **`subtle`** takes a *high-entropy* secret — an X25519 shared secret, a master key, a random 32-byte seed — and expands it cheaply into as many purpose-bound subkeys as you need via HKDF. Use it when a CSPRNG or a Diffie-Hellman produced the input.
+
+Running Argon2 on a random 32-byte key wastes 64 MiB and several hundred milliseconds for no security gain. Running HKDF on a user password produces a key that is exactly as guessable as the password.
+
+## argon2 password stretching
+
+`github.com/sonr-io/crypto/argon2` wraps `golang.org/x/crypto/argon2`. It uses **Argon2id** exclusively — `DeriveKey` calls `argon2.IDKey`, and the encoded hash format hardcodes the `argon2id` label. There is no way to select Argon2i or Argon2d through this API, which is the right default: id is the hybrid variant recommended for password hashing because it resists both side-channel and time-memory-tradeoff attacks.
+
+### Preset parameters
+
+These are the exact literals from `argon2/kdf.go`. `Memory` is in **kibibytes**, matching the underlying `argon2.IDKey` signature.
+
+| Field | `LightConfig()` | `DefaultConfig()` | `HighSecurityConfig()` |
+| --- | --- | --- | --- |
+| `Time` (iterations) | `1` | `1` | `3` |
+| `Memory` (KiB) | `16384` (16 MiB) | `65536` (64 MiB) | `131072` (128 MiB) |
+| `Parallelism` (threads) | `2` | `4` | `4` |
+| `SaltLength` (bytes) | `16` | `32` | `32` |
+| `KeyLength` (bytes) | `32` | `32` | `32` |
+
+All three produce a 32-byte key, which is exactly `aead.KeySize`, so any preset's output plugs directly into [`aead.NewAESGCM`](/symmetric/aead).
+
+`LightConfig` is described in source as "lighter parameters for testing". Use it in tests and CI, not for real credentials.
+
+<TypeTable
+  type={{
+    Time: {
+      type: "uint32",
+      required: true,
+      description: "Number of Argon2 passes over memory. Must be >= 1.",
+      default: "1"
+    },
+    Memory: {
+      type: "uint32",
+      required: true,
+      description: "Memory cost in kibibytes. ValidateConfig requires >= 8192 (8 MiB).",
+      default: "65536"
+    },
+    Parallelism: {
+      type: "uint8",
+      required: true,
+      description: "Number of lanes/threads. Must be >= 1.",
+      default: "4"
+    },
+    SaltLength: {
+      type: "uint32",
+      required: true,
+      description: "Size of salts produced by GenerateSalt. Must be >= 8. Not enforced on salts you pass to DeriveKey yourself.",
+      default: "32"
+    },
+    KeyLength: {
+      type: "uint32",
+      required: true,
+      description: "Output key length in bytes. Must be >= 16.",
+      default: "32"
+    }
+  }}
+/>
+
+`ValidateConfig` enforces the floors listed above — `Time >= 1`, `Memory >= 8*1024`, `Parallelism >= 1`, `SaltLength >= 8`, `KeyLength >= 16` — and returns a plain error naming the first violated bound.
+
+### Deriving a key
+
+Grounded in `argon2/kdf_test.go` (`TestKDF_DeriveKey`, `TestKDF_GenerateSalt`):
+
+```go derive.go
+package main
+
+import (
+	"fmt"
+
+	"github.com/sonr-io/crypto/argon2"
+)
+
+func main() {
+	cfg := argon2.DefaultConfig()
+	if err := argon2.ValidateConfig(cfg); err != nil { // New() does not validate for you
+		panic(err)
+	}
+
+	kdf := argon2.New(cfg) // New(nil) falls back to DefaultConfig()
+
+	salt, err := kdf.GenerateSalt() // cfg.SaltLength == 32 bytes
+	if err != nil {
+		panic(err)
+	}
+
+	key := kdf.DeriveKey([]byte("correct horse battery staple"), salt)
+	fmt.Println(len(key)) // 32 == cfg.KeyLength
+}
+```
+
+`DeriveKey` returns no error — every failure mode of Argon2id is a programming error rather than a runtime one — and it is deterministic in `(password, salt, config)`. It is safe to call concurrently from many goroutines on one `*KDF`; the package's `TestConcurrentDerivation` does exactly that. Remember that each concurrent call allocates `Memory` kibibytes, so N parallel derivations with `DefaultConfig` reserve N × 64 MiB.
+
+### Password hashes and the PHC string
+
+`HashPassword` is the "store this in your users table" path. It generates a fresh salt, derives the key, and encodes everything needed to verify later into one self-describing string:
+
+```text
+$argon2id$v=19$m=65536,t=1,p=4$<salt>$<hash>
+ │        │    │                │      └─ derived key, base64.RawStdEncoding
+ │        │    │                └──────── salt, base64.RawStdEncoding
+ │        │    └───────────────────────── Memory,Time,Parallelism from the config
+ │        └────────────────────────────── argon2.Version, always 19
+ └─────────────────────────────────────── variant label, always "argon2id"
+```
+
+The two base64 segments use `base64.RawStdEncoding`: **standard** alphabet (`+` and `/`, not URL-safe) with **no** `=` padding. Splitting the string on `$` yields exactly six parts, the first being empty.
+
+`VerifyPassword` is the inverse and is a package-level function, not a method — it does not need your `*KDF` because it reads the parameters back out of the string:
+
+```go verify.go
+kdf := argon2.New(argon2.DefaultConfig())
+
+encoded, err := kdf.HashPassword([]byte("MySecureP@ssw0rd"))
+if err != nil {
+	panic(err)
+}
+// encoded == "$argon2id$v=19$m=65536,t=1,p=4$...$..."
+
+ok, err := argon2.VerifyPassword([]byte("MySecureP@ssw0rd"), encoded)
+if err != nil {
+	panic(err) // malformed string, wrong variant, or unsupported version
+}
+fmt.Println(ok) // true
+
+ok, _ = argon2.VerifyPassword([]byte("wrong"), encoded)
+fmt.Println(ok) // false, err == nil
+```
+
+Note the two-channel result: `err` means *the hash string is unusable*, `ok == false` means *the password is wrong*. Never collapse them — treating a parse error as a failed login masks corruption in your credential store.
+
+The final comparison uses `crypto/subtle.ConstantTimeCompare`. `CompareHashes(a, b)` exposes the same primitive for comparing any two byte slices, and it is the constant-time comparison you should prefer across this whole library — see the [note on duplicated helpers](/symmetric/secrets#duplicated-helpers).
+
+### argon2 caveats
+
+:::danger[VerifyPassword trusts the parameters in the hash string]
+`decodeHash` parses `m`, `t`, and `p` out of the encoded hash and `VerifyPassword` derives with those values, not with your configured ones. That is what makes stored hashes upgradeable — but it also means the cost of a verification is chosen by whoever supplied the string.
+
+If an attacker can get an arbitrary encoded hash into the verify path (a "check this hash" endpoint, an imported credential file, a tenant-supplied record), `m=4194304` makes your process try to allocate 4 GiB per call. Only ever call `VerifyPassword` with strings your own `HashPassword` produced and your own storage returned, and if a hash can come from outside, parse and bound `m`/`t`/`p` yourself before verifying.
+:::
+
+:::warning[New() and DeriveKey() never validate the config]
+`ValidateConfig` exists but nothing in the package calls it. `New(&Config{Time: 0, Memory: 1, Parallelism: 0, KeyLength: 1})` returns a working `*KDF`, and `DeriveKey` hands those values straight to `argon2.IDKey`, which **panics** rather than erroring on out-of-range parameters — `golang.org/x/crypto/argon2` panics with `argon2: number of rounds too small` for `Time < 1` and `argon2: parallelism degree too low` for `Parallelism < 1`. A bad config is therefore a crash on the derivation path, not a returned error. Call `ValidateConfig` yourself on any config you did not get from one of the three preset constructors.
+
+`DeriveKey` also ignores `SaltLength` entirely: it uses whatever slice you pass. A one-byte salt is accepted silently. Get salts from `GenerateSalt` or from the [`salt`](/symmetric/secrets#salt) package.
+:::
+
+:::warning[EstimateTime is a formula, not a measurement]
+`EstimateTime(config, iterations)` computes `Time * Memory / 65536 * iterations` and formats the result as `"1.00 s"`. There is no benchmark, no calibration, and no hardware input behind it — with `DefaultConfig()` and one iteration it returns exactly `"1.00 s"` by construction, whatever machine you are on. Its own comment calls it "a rough estimate". Do not surface its output to users or use it to pick parameters; measure on your target hardware instead.
+:::
+
+:::note[No pepper, no rehash-on-login helper]
+There is no application-wide secret ("pepper") input, and no helper that detects a stored hash using outdated parameters and transparently upgrades it. If you tighten your config, you must compare the parsed `m`/`t`/`p` against your current settings after a successful verification and re-hash yourself.
+:::
+
+## subtle HKDF and X25519
+
+`github.com/sonr-io/crypto/subtle` is a Tink-derived helper package: HKDF, a hash-function registry keyed by string, an elliptic-curve registry keyed by string, and the three X25519 functions. It is where you go for cheap expansion of an already-random secret.
+
+:::note[This package has no tests and no in-repo callers]
+Unlike every other package on this page, `subtle` ships with no `_test.go` file, and nothing else in this module imports it (only its `subtle/random` subpackage is used elsewhere). The code is short and closely follows upstream Tink, but the examples below are derived from the signatures and behaviour in `hkdf.go`, `subtle.go`, and `x25519.go` rather than from an executed test. Validate against your own vectors before depending on it.
+:::
+
+### Accepted name strings
+
+`GetHashFunc`, `GetHashDigestSize`, and `ComputeHKDF` all key off a hash **name string**, and they return `nil` / an error for anything unrecognised. The accepted spellings are exact:
+
+| Hash name | Digest size (`GetHashDigestSize`) | Backing function |
+| --- | --- | --- |
+| `"SHA1"` | `20` | `sha1.New` |
+| `"SHA224"` | `28` | `sha256.New224` |
+| `"SHA256"` | `32` | `sha256.New` |
+| `"SHA384"` | `48` | `sha512.New384` |
+| `"SHA512"` | `64` | `sha512.New` |
+
+`ConvertHashName` normalises the hyphenated spellings into the above — `"SHA-1"`→`"SHA1"`, `"SHA-224"`→`"SHA224"`, `"SHA-256"`→`"SHA256"`, `"SHA-384"`→`"SHA384"`, `"SHA-512"`→`"SHA512"` — and returns the **empty string** for anything else.
+
+`ConvertCurveName` and `GetCurve` work the same way for NIST curves:
+
+| Input to `ConvertCurveName` | Canonical name | `GetCurve` returns |
+| --- | --- | --- |
+| `"secp256r1"`, `"P-256"` | `"NIST_P256"` | `elliptic.P256()` |
+| `"secp384r1"`, `"P-384"` | `"NIST_P384"` | `elliptic.P384()` |
+| `"secp521r1"`, `"P-521"` | `"NIST_P521"` | `elliptic.P521()` |
+
+:::warning[Unknown names fail silently as zero values]
+`ConvertHashName("sha256")` — lowercase — returns `""`, not an error. `GetHashFunc("")` returns a `nil` function, and `GetCurve("P-256")` returns `nil` because it wants the *converted* name `"NIST_P256"`. The source carries an upstream `TODO(ckl)` acknowledging that these should return explicit errors. Always check for `""` / `nil` after a lookup; `ComputeHash(nil, data)` at least fails loudly with `nil hash function`.
+:::
+
+### ComputeHKDF
+
+```go
+func ComputeHKDF(hashAlg string, key, salt, info []byte, tagSize uint32) ([]byte, error)
+```
+
+<TypeTable
+  type={{
+    hashAlg: {
+      type: "string",
+      required: true,
+      description: "One of SHA1, SHA224, SHA256, SHA384, SHA512. Anything else errors with 'hkdf: invalid hash algorithm'."
+    },
+    key: {
+      type: "[]byte",
+      required: true,
+      description: "Input keying material (IKM). Its length is NOT validated — an empty key is accepted."
+    },
+    salt: {
+      type: "[]byte",
+      description: "Optional. If empty or nil it is replaced by a zero-filled slice of the hash's digest size, per RFC 5869."
+    },
+    info: {
+      type: "[]byte",
+      description: "Context/application binding. Use a distinct, versioned label per derived key."
+    },
+    tagSize: {
+      type: "uint32",
+      required: true,
+      description: "Output length in bytes. Must be >= 10 ('tag size too small') and <= 255 * digestSize ('tag size too big')."
+    }
+  }}
+/>
+
+The 10-byte floor is a named constant, `minTagSizeInBytes`, documented in source as providing at least 80-bit security strength. The `255 * digestSize` ceiling is HKDF's structural maximum.
+
+### X25519 ECDH → HKDF → AEAD
+
+This is the pipeline `subtle` exists to serve: agree on a shared secret with a peer, expand it into a purpose-bound AEAD key, encrypt.
+
+```go pipeline.go
+package main
+
+import (
+	"fmt"
+
+	"github.com/sonr-io/crypto/aead"
+	"github.com/sonr-io/crypto/secure"
+	"github.com/sonr-io/crypto/subtle"
+)
+
+func main() {
+	// 1. Each side generates a 32-byte X25519 private key and publishes the public value.
+	alicePriv, err := subtle.GeneratePrivateKeyX25519()
+	if err != nil {
+		panic(err)
+	}
+	alicePub, err := subtle.PublicFromPrivateX25519(alicePriv)
+	if err != nil {
+		panic(err)
+	}
+
+	bobPriv, err := subtle.GeneratePrivateKeyX25519()
+	if err != nil {
+		panic(err)
+	}
+	bobPub, err := subtle.PublicFromPrivateX25519(bobPriv)
+	if err != nil {
+		panic(err)
+	}
+
+	// 2. Both sides compute the same 32-byte shared secret. Always check the error.
+	aliceSecret, err := subtle.ComputeSharedSecretX25519(alicePriv, bobPub)
+	if err != nil {
+		panic(err)
+	}
+	bobSecret, err := subtle.ComputeSharedSecretX25519(bobPriv, alicePub)
+	if err != nil {
+		panic(err)
+	}
+	defer secure.ZeroizeMultiple(aliceSecret, bobSecret)
+
+	// 3. Never use the raw DH output as a key. Expand it, binding both public
+	//    values and a versioned label into `info`.
+	info := append(append([]byte("sonr/x25519-aead/v1|"), alicePub...), bobPub...)
+	key, err := subtle.ComputeHKDF("SHA256", aliceSecret, nil, info, aead.KeySize)
+	if err != nil {
+		panic(err)
+	}
+	defer secure.Zeroize(key)
+
+	// 4. Encrypt.
+	c, err := aead.NewAESGCM(key)
+	if err != nil {
+		panic(err)
+	}
+	ct, err := c.Encrypt([]byte("hello"), nil)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(len(ct)) // 12 + 5 + 16
+}
+```
+
+Deriving several keys from one secret is the same call with a different `info`, which is the entire point of the label:
+
+```go
+sendKey, _ := subtle.ComputeHKDF("SHA256", shared, salt, []byte("c2s v1"), 32)
+recvKey, _ := subtle.ComputeHKDF("SHA256", shared, salt, []byte("s2c v1"), 32)
+sivKey, _ := subtle.ComputeHKDF("SHA256", shared, salt, []byte("wrap v1"), 64) // daed.AESSIVKeySize
+```
+
+### subtle caveats
+
+:::danger[Raw Diffie-Hellman output is not a key]
+`ComputeSharedSecretX25519` returns the X-coordinate of the scalar multiplication. It is 32 bytes but it is not uniformly distributed, and using it directly as an AES key is a real weakness. Always pass it through `ComputeHKDF` (or another KDF) with an `info` label that binds the protocol, the version, and both parties' public values. The `PublicFromPrivateX25519` function is itself just `ComputeSharedSecretX25519(privKey, curve25519.Basepoint)`, so the same 32-byte shape means "public key" in one place and "shared secret" in another — do not let those slices get mixed up in your code.
+:::
+
+:::warning[Always check the X25519 error before touching the result]
+All three X25519 functions return `([]byte, error)`, and `GeneratePrivateKeyX25519` in particular returns its buffer *and* the error together — the slice is non-nil even on failure. `ComputeSharedSecretX25519` delegates to `curve25519.X25519`, which reports degenerate inputs as an error rather than handing back a weak secret. Silently ignoring these errors is how you end up encrypting under an all-zero or partially-initialised key.
+:::
+
+:::warning[ComputeHKDF does not validate the input key length]
+`validateHKDFParams` takes the key size as an ignored `_ uint32` parameter and only checks the hash name and the tag size. `ComputeHKDF("SHA256", nil, nil, info, 32)` succeeds and returns a deterministic 32 bytes derived from nothing. Verify your IKM is non-empty and genuinely high-entropy before calling.
+:::
+
+:::note[SHA1 is still reachable]
+`"SHA1"` remains in the hash registry, so `ComputeHKDF("SHA1", ...)` works. HMAC-SHA1 is not broken as a PRF, but there is no reason to pick it for new work — use `"SHA256"` unless an existing protocol pins SHA-1.
+:::
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Secret hygiene" href="/symmetric/secrets" icon="eye-off">
+    Salts, zeroization, password policy, and which of the three duplicated SecureCompare helpers to prefer.
+  </Card>
+  <Card title="Randomized AEAD" href="/symmetric/aead" icon="lock-keyhole">
+    Where the 32-byte derived key gets used.
+  </Card>
+</CardGroup>

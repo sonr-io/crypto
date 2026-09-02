@@ -1,0 +1,452 @@
+---
+title: Accumulator
+description: Pairing-based ECC accumulator — a constant-size commitment to a set, constant-size membership witnesses, and a zero-knowledge membership proof that hides which element is held.
+sidebar:
+  label: Accumulator
+  order: 3
+  icon: list-checks
+---
+
+The `accumulator` package implements the pairing-based accumulator of
+[eprint 2020/777](https://eprint.iacr.org/2020/777.pdf), together with the zero-knowledge
+proof of knowledge from section 7 of that paper. Its own package doc states the scope limit
+up front: **only the membership-witness case is implemented**. Non-membership witnesses, and
+the accumulator initialisation those would require, are deliberately absent —
+`Accumulator.New` simply sets the initial value to the G1 generator.
+
+## The value proposition
+
+Three properties, and they are the entire reason to reach for this instead of a Merkle tree
+or a plain list:
+
+- **The accumulator is one curve point** regardless of how many elements it holds. On
+  BLS12-381 that is a 48-byte compressed G1 point; `Accumulator.MarshalBinary` returns 60
+  bytes with its BARE framing, at 1 element and at 5000 alike.
+- **A membership witness is one curve point plus its element.**
+  `MembershipWitness.MarshalBinary` is 92 bytes, again independent of set size.
+- **The membership proof hides the element.** A verifier learns that the prover holds a valid
+  witness for *some* accumulated element, not which one.
+
+That last property is what makes this a privacy-preserving revocation mechanism. An issuer
+accumulates one element per valid credential and publishes the accumulator. A holder proves
+its credential is still accumulated without identifying the credential, and therefore without
+being linkable across presentations. Revocation is a `Remove` by the manager.
+
+## When not to use it
+
+Only the holder of the `SecretKey` can mutate the set or issue a witness — `Add`, `Remove`,
+`AddElements`, `Update`, and `MembershipWitness.New` all take `*SecretKey`. If you need a
+publicly-updatable set, or set membership without a trusted manager, this is the wrong tool.
+If you need non-membership proofs, they are not implemented. If you need proofs cheaper than
+a multi-pairing per verification, look elsewhere.
+
+Also note the operational cost: every update invalidates every outstanding witness. See the
+[witness staleness](#witness-staleness-is-the-hard-part) warning below before committing to
+this design.
+
+## Types
+
+Everything here is over a **pairing** curve — in practice `curves.BLS12381(&curves.PointBls12381G1{})`.
+The accumulator value lives in G1; the public key lives in G2.
+
+| Type | Definition | Notes |
+| --- | --- | --- |
+| `Element` | `curves.Scalar` | A set member. Callers hash application data into it, e.g. `curve.Scalar.Hash([]byte("credential-id"))`. |
+| `Coefficient` | `curves.Point` | Batch-update polynomial coefficients published by the manager alongside an `Update`. |
+| `Accumulator` | struct, unexported `value curves.Point` | The set commitment. |
+| `SecretKey` | struct, unexported `value curves.Scalar` | The manager's alpha. |
+| `PublicKey` | struct, unexported `value curves.PairingPoint` | `alpha · G2`. |
+| `Delta` | struct, unexported `d curves.Scalar`, `p curves.Point` | Witness-update material. See the caveat — you cannot build one. |
+| `MembershipWitness` | struct, unexported `c curves.Point`, `y curves.Scalar` | A holder's witness for element `y`. |
+
+Every one of these types implements `MarshalBinary() ([]byte, error)` and
+`UnmarshalBinary([]byte) error` — the encoding is BARE (`git.sr.ht/~sircmpwn/go-bare`). Note
+that all fields are unexported, so binary marshalling is the *only* way to move these values
+across a process boundary; there is no JSON codec and no field access.
+
+## Keys
+
+<TypeTable
+  type={{
+    "SecretKey.New": {
+      type: "func(curve *curves.PairingCurve, seed []byte) (*SecretKey, error)",
+      required: true,
+      description: "Derives alpha as curve.Scalar.Hash(seed). Fully deterministic in the seed; performs no validation of seed quality or length.",
+    },
+    "SecretKey.GetPublicKey": {
+      type: "func(curve *curves.PairingCurve) (*PublicKey, error)",
+      required: true,
+      description: "Returns alpha times the G2 generator. Errors if the key or curve is nil.",
+    },
+    "SecretKey.BatchAdditions": {
+      type: "func(additions []Element) (Element, error)",
+      description: "product(y + alpha) over the additions. The multiplier applied to the accumulator on a batch add.",
+    },
+    "SecretKey.BatchDeletions": {
+      type: "func(deletions []Element) (Element, error)",
+      description: "1/product(y + alpha) over the deletions.",
+    },
+    "SecretKey.CreateCoefficients": {
+      type: "func(additions, deletions []Element) ([]Element, error)",
+      description: "Batch polynomial coefficients per page 7 of the paper. Update calls this for you; call it directly only if you are reimplementing Update.",
+    },
+  }}
+/>
+
+:::warning[SecretKey.New is a bare hash of the seed]
+`SecretKey.New` is `sk.value = curve.Scalar.Hash(seed)` and always returns a nil error. It
+does not check seed length or entropy. A short or predictable seed yields a guessable alpha,
+and alpha is total control over the set. Feed it at least 32 bytes from a CSPRNG, or a
+properly derived key — see [Key derivation](/symmetric/key-derivation).
+:::
+
+## Accumulator operations
+
+<TypeTable
+  type={{
+    "Accumulator.New": {
+      type: "func(curve *curves.PairingCurve) (*Accumulator, error)",
+      required: true,
+      description: "Sets the value to the G1 generator. Called on the receiver, so the idiom is new(Accumulator).New(curve).",
+    },
+    "Accumulator.WithElements": {
+      type: "func(curve *curves.PairingCurve, key *SecretKey, m []Element) (*Accumulator, error)",
+      description: "New plus a batch add: V = product(y + alpha) · V0. The usual way to bootstrap a populated set.",
+    },
+    "Accumulator.Add": {
+      type: "func(key *SecretKey, e Element) (*Accumulator, error)",
+      description: "V' = (y + alpha) · V. Errors if the accumulator value is nil or the identity.",
+    },
+    "Accumulator.AddElements": {
+      type: "func(key *SecretKey, m []Element) (*Accumulator, error)",
+      description: "Batch add. Does not emit coefficients, so holders cannot update from it — use Update if witnesses are outstanding.",
+    },
+    "Accumulator.Remove": {
+      type: "func(key *SecretKey, e Element) (*Accumulator, error)",
+      description: "V' = 1/(y + alpha) · V. Does not verify the element was ever added; removing an absent element silently produces a different accumulator.",
+    },
+    "Accumulator.Update": {
+      type: "func(key *SecretKey, additions, deletions []Element) (*Accumulator, []Coefficient, error)",
+      description: "Batch add and delete in one step, returning the coefficients holders need for BatchUpdate. This is the update method to use in production.",
+    },
+  }}
+/>
+
+:::danger[Every mutator mutates the receiver in place]
+`Add`, `AddElements`, `Remove`, `Update`, `WithElements`, and `New` all assign to
+`acc.value` and then return the same pointer. The returned `*Accumulator` is **not** a new
+object — it is the receiver. This idiom compiles cleanly and reads like a functional API:
+
+```go
+newAcc, _, err := acc.Update(sk, additions, deletions) // newAcc == acc
+```
+
+but `acc` has already changed. If you need the previous state — to serve an older epoch, or
+to roll back — call `MarshalBinary()` **before** the mutation and keep the bytes.
+`MembershipWitness.New`, `ApplyDelta`, `BatchUpdate`, and `MultiBatchUpdate` behave the same
+way on their receivers.
+:::
+
+## Witnesses
+
+<TypeTable
+  type={{
+    "MembershipWitness.New": {
+      type: "func(y Element, acc *Accumulator, sk *SecretKey) (*MembershipWitness, error)",
+      required: true,
+      description: "Issues a witness for y against the current accumulator: C = 1/(y + alpha) · V. Requires the secret key, so only the manager can issue.",
+    },
+    "MembershipWitness.Verify": {
+      type: "func(pk *PublicKey, acc *Accumulator) error",
+      required: true,
+      description: "Multi-pairing check e(C, y·P̃ + Q̃) · e(-V, P̃) == 1. Returns nil on success. Public — any holder or verifier can run it.",
+    },
+    "MembershipWitness.BatchUpdate": {
+      type: "func(additions, deletions []Element, coefficients []Coefficient) (*MembershipWitness, error)",
+      required: true,
+      description: "Refreshes a stale witness against one published Update. This is the update path callers should use.",
+    },
+    "MembershipWitness.MultiBatchUpdate": {
+      type: "func(A [][]Element, D [][]Element, C [][]Coefficient) (*MembershipWitness, error)",
+      description: "Catches up across several epochs at once. All three outer slices must have the same length; index i is the i-th epoch's additions, deletions, and coefficients.",
+    },
+    "MembershipWitness.ApplyDelta": {
+      type: "func(delta *Delta) (*MembershipWitness, error)",
+      description: "Applies precomputed update material. Effectively unreachable — see caveats.",
+    },
+  }}
+/>
+
+### Witness staleness is the hard part
+
+:::danger[Updating the set invalidates every outstanding witness]
+The witness for element `y` is `1/(y + alpha) · V`, defined *relative to a specific
+accumulator value*. The moment the manager adds or removes anything, `V` changes and every
+holder's `Verify(pk, acc)` against the new accumulator fails. This is not a bug; it is
+inherent to the construction, and it is the dominant operational cost of deploying it.
+
+The manager must therefore publish, for each update, the `[]Coefficient` returned by
+`Update` along with the exact `additions` and `deletions` element lists. Holders call
+`BatchUpdate(additions, deletions, coefficients)` to move their witness forward. A holder
+that misses epochs uses `MultiBatchUpdate` with the per-epoch slices.
+
+Consequences you must design for:
+
+- Coefficients and element lists are **not secret**, but they *do* reveal exactly which
+  elements were added and removed. Batch your updates if that leakage matters.
+- A holder that skips an epoch and cannot obtain that epoch's coefficients can never repair
+  its witness without the manager reissuing via `MembershipWitness.New`.
+- `AddElements` returns no coefficients at all. Use `Update` — even with an empty deletion
+  slice — whenever witnesses are outstanding.
+- A stale witness does not report itself as stale. `Verify` returns the generic
+  `"invalid result"` from the failed pairing check, which is indistinguishable from a forged
+  witness. Track the accumulator epoch alongside the witness in your own state.
+:::
+
+## Zero-knowledge membership proof
+
+The proof protocol from section 7 of the paper. Unlike the witness check, this hides `y`.
+It is a three-move sigma protocol compiled with Fiat-Shamir, and — unusually — verification
+is expressed as *recomputing the challenge and comparing it*, not as a `Verify` method.
+
+<TypeTable
+  type={{
+    "ProofParams.New": {
+      type: "func(curve *curves.PairingCurve, pk *PublicKey, entropy []byte) (*ProofParams, error)",
+      required: true,
+      description: "Samples the public G1 generators X, Y, Z (and K) from the entropy, the public key, and the curve. Both prover and verifier must use identical params.",
+    },
+    "MembershipProofCommitting.New": {
+      type: "func(witness *MembershipWitness, acc *Accumulator, pp *ProofParams, pk *PublicKey) (*MembershipProofCommitting, error)",
+      required: true,
+      description: "Prover's commit phase. Holds all the blinding values; keep it private and short-lived.",
+    },
+    "MembershipProofCommitting.GetChallengeBytes": {
+      type: "func() []byte",
+      required: true,
+      description: "The transcript to hash for the challenge: V || Ec || T_sigma || T_rho || R_E || R_sigma || R_rho || R_delta_sigma || R_delta_rho.",
+    },
+    "MembershipProofCommitting.GenProof": {
+      type: "func(c curves.Scalar) *MembershipProof",
+      required: true,
+      description: "Computes the s values for the given challenge. Returns the proof to send. No error return.",
+    },
+    "MembershipProof.Finalize": {
+      type: "func(acc *Accumulator, pp *ProofParams, pk *PublicKey, challenge curves.Scalar) (*MembershipProofFinal, error)",
+      required: true,
+      description: "Verifier side: recomputes the commitment values from the proof, the accumulator, and the params.",
+    },
+    "MembershipProofFinal.GetChallenge": {
+      type: "func(curve *curves.PairingCurve) curves.Scalar",
+      required: true,
+      description: "Recomputes the Fiat-Shamir challenge from the finalized values. Verification succeeds iff this equals the challenge the prover used.",
+    },
+  }}
+/>
+
+## Full lifecycle
+
+<Steps>
+  <Step title="Set up the manager">
+    Derive a `SecretKey` from a strong seed and publish the `PublicKey`.
+  </Step>
+  <Step title="Accumulate the initial members">
+    `new(Accumulator).WithElements(curve, sk, elements)` and publish the accumulator bytes.
+  </Step>
+  <Step title="Issue a witness">
+    For each holder, `new(MembershipWitness).New(element, acc, sk)` and deliver the witness
+    bytes privately. This step needs the secret key.
+  </Step>
+  <Step title="Prove membership">
+    The holder builds `ProofParams`, runs `MembershipProofCommitting`, hashes
+    `GetChallengeBytes()` into a challenge, and sends the challenge plus `GenProof(challenge)`.
+  </Step>
+  <Step title="Verify">
+    The verifier calls `Finalize` then `GetChallenge`, and accepts iff the recomputed
+    challenge equals the one it was given.
+  </Step>
+  <Step title="Update the set">
+    The manager calls `Update(sk, additions, deletions)` and publishes the new accumulator,
+    the element lists, and the coefficients.
+  </Step>
+  <Step title="Refresh witnesses">
+    Every holder calls `BatchUpdate(additions, deletions, coefficients)`, then can prove again
+    against the new accumulator.
+  </Step>
+</Steps>
+
+### Membership proof end to end
+
+Grounded in `accumulator/proof_test.go` (`TestMembershipProof`) and
+`accumulator/witness_test.go` (`Test_Membership`, `Test_Membership_Batch_Update`).
+
+```go membership.go
+package main
+
+import (
+	"fmt"
+
+	"github.com/sonr-io/crypto/accumulator"
+	"github.com/sonr-io/crypto/core/curves"
+)
+
+func main() {
+	curve := curves.BLS12381(&curves.PointBls12381G1{})
+
+	// --- Manager setup -----------------------------------------------------
+	sk, err := new(accumulator.SecretKey).New(curve, []byte("32-plus-bytes-of-real-entropy..."))
+	if err != nil {
+		panic(err)
+	}
+	pk, err := sk.GetPublicKey(curve)
+	if err != nil {
+		panic(err)
+	}
+
+	// Application data is hashed into set elements.
+	elements := []accumulator.Element{
+		curve.Scalar.Hash([]byte("credential-3")),
+		curve.Scalar.Hash([]byte("credential-4")),
+		curve.Scalar.Hash([]byte("credential-5")),
+		curve.Scalar.Hash([]byte("credential-6")),
+	}
+
+	acc, err := new(accumulator.Accumulator).WithElements(curve, sk, elements)
+	if err != nil {
+		panic(err)
+	}
+
+	// --- Issue a witness (manager only, needs sk) --------------------------
+	wit, err := new(accumulator.MembershipWitness).New(elements[3], acc, sk)
+	if err != nil {
+		panic(err)
+	}
+
+	// The plain witness check reveals which element is held. Use it for
+	// self-diagnosis, not as a privacy-preserving presentation.
+	if err := wit.Verify(pk, acc); err != nil {
+		panic(err)
+	}
+
+	// --- Zero-knowledge membership proof -----------------------------------
+	// Both sides must derive identical ProofParams.
+	params, err := new(accumulator.ProofParams).New(curve, pk, []byte("proof-params/v1"))
+	if err != nil {
+		panic(err)
+	}
+
+	mpc, err := new(accumulator.MembershipProofCommitting).New(wit, acc, params, pk)
+	if err != nil {
+		panic(err)
+	}
+	challenge := curve.Scalar.Hash(mpc.GetChallengeBytes())
+	proof := mpc.GenProof(challenge)
+
+	// Verifier: it has acc, pk, params, the proof, and the challenge.
+	final, err := proof.Finalize(acc, params, pk, challenge)
+	if err != nil {
+		panic(err)
+	}
+	if final.GetChallenge(curve).Cmp(challenge) != 0 {
+		panic("membership proof rejected")
+	}
+	fmt.Println("membership proved without revealing which element")
+
+	// --- Manager revokes and adds ------------------------------------------
+	additions := []accumulator.Element{curve.Scalar.Hash([]byte("credential-7"))}
+	deletions := []accumulator.Element{curve.Scalar.Hash([]byte("credential-5"))}
+
+	// Note: this mutates acc in place and also returns it.
+	_, coefficients, err := acc.Update(sk, additions, deletions)
+	if err != nil {
+		panic(err)
+	}
+
+	// --- Holder refreshes its now-stale witness ----------------------------
+	if _, err := wit.BatchUpdate(additions, deletions, coefficients); err != nil {
+		panic(err)
+	}
+	if err := wit.Verify(pk, acc); err != nil {
+		panic(err) // would fail without the BatchUpdate above
+	}
+}
+```
+
+Note that a fresh `ProofParams` per presentation is fine and is what the test does — proof
+params are public and only need to agree between the two parties for that one exchange.
+
+### Catching up across epochs
+
+`MultiBatchUpdate` takes three parallel outer slices, one entry per epoch, and errors with
+`"a, d, c should have same length"` if they disagree. From
+`Test_Membership_Multi_Batch_Update`:
+
+```go catchup.go
+_, coeffs1, _ := acc.Update(sk, adds1, dels1)
+_, coeffs2, _ := acc.Update(sk, []accumulator.Element{}, dels2)
+_, coeffs3, _ := acc.Update(sk, []accumulator.Element{}, dels3)
+
+a := [][]accumulator.Element{adds1, {}, {}}
+d := [][]accumulator.Element{dels1, dels2, dels3}
+c := [][]accumulator.Coefficient{coeffs1, coeffs2, coeffs3}
+
+if _, err := wit.MultiBatchUpdate(a, d, c); err != nil {
+	panic(err)
+}
+if err := wit.Verify(pk, acc); err != nil {
+	panic(err)
+}
+```
+
+## Caveats
+
+:::danger[ApplyDelta is unreachable from outside the package]
+`ApplyDelta(delta *Delta)` is exported, but `Delta`'s fields are unexported and the only
+constructors — `evaluateDelta` and `evaluateDeltas` — are unexported. No exported function
+anywhere in the package returns a `*Delta`. From another package you can therefore obtain one
+only by `UnmarshalBinary`-ing bytes that some in-package code produced, and no in-package code
+hands them to you. Treat `ApplyDelta` as an internal helper and use `BatchUpdate` /
+`MultiBatchUpdate`, which construct the delta for you.
+:::
+
+:::warning[Remove does not check membership]
+`Remove` applies `1/(y + alpha)` unconditionally. Removing an element that was never added
+yields a mathematically valid but semantically meaningless accumulator, and every outstanding
+witness silently stops verifying with no diagnostic. The package keeps no member list — the
+manager must track set contents itself.
+:::
+
+:::warning[No length or duplicate checks on batch inputs]
+`BatchAdditions`, `BatchDeletions`, and `Update` accept whatever elements you pass, including
+duplicates. Adding the same element twice multiplies the accumulator by `(y + alpha)` twice,
+and one `Remove` will not undo both.
+:::
+
+:::note[Non-membership is not implemented]
+The paper's non-membership witnesses require a different accumulator initialisation
+(`V0 = product(y + alpha) · P` over a designated set). This package's `New` sets `V0` to the
+plain G1 generator and its own doc comment flags this as the reason non-membership is out of
+scope. Do not attempt to derive non-membership proofs from this API.
+:::
+
+:::info[There is no MembershipProof.Verify]
+Verification is a two-call sequence — `Finalize` then `GetChallenge` — followed by a scalar
+comparison you write yourself. Forgetting the comparison, or comparing against a challenge
+the *prover* supplied without deriving it from a transcript you control, defeats the proof.
+The prover's challenge in the test is `curve.Scalar.Hash(mpc.GetChallengeBytes())`; a verifier
+that wants soundness against a chosen-challenge prover should recompute the challenge from the
+proof transcript rather than trusting a transmitted scalar.
+:::
+
+:::warning[A revoked holder gets a cryptic error, not a clean rejection]
+`BatchUpdate` inverts `product(yD_i - y)` over the deletion list. If the holder's own element
+`y` appears in `deletions`, that product is zero and the call fails with
+`"no inverse exists"`. That is the revoked-credential path, and it surfaces as an internal
+arithmetic error rather than a "you were revoked" signal. Handle it explicitly.
+:::
+
+On ordering: the `additions` and `deletions` slices a holder passes to `BatchUpdate` enter
+only as products, so their internal order is irrelevant — but they must be the same *sets*
+the manager passed to `Update`. The `[]Coefficient` slice is different: it is evaluated as a
+polynomial by index, so it must be passed exactly as `Update` returned it, unreordered and
+untruncated.

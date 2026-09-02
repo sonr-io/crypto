@@ -8,3 +8,5 @@ CLAUDE.md
 
 .opencode
 
+node_modules/
+.blume/

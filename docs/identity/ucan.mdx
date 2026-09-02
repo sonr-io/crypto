@@ -1,0 +1,751 @@
+---
+title: UCAN Capability Tokens
+description: JWT-based User-Controlled Authorization Network tokens signed by an MPC enclave — capabilities, attenuation, delegation chains, templates, and the authorization checks that are not implemented.
+sidebar:
+  order: 4
+  icon: ticket
+---
+
+`github.com/sonr-io/crypto/ucan` implements UCAN — capability tokens where authority flows from a key
+rather than from a server-side ACL. A token is a JWT whose issuer (`iss`) is a
+[`did:key`](/identity/did-key), whose audience (`aud`) is the recipient's DID, and whose `att` claim
+is a list of *attenuations*: `(capability, resource)` pairs. The holder of a token can mint a new
+token that grants a **subset** of its own authority to someone else, attaching the parent token as a
+proof in `prf`. Verification walks that chain back to a root the verifier trusts.
+
+Tokens carry the UCAN version in a `ucv` JWT header. In this package that value is the literal
+`"0.9.0"`, written inline in `ucan/source.go`; the only exported constant naming it is
+`spec.UCANVersion` in [`mpc/spec`](/identity/mpc-enclave).
+
+**Reach for this when** you need offline-verifiable, expiring, narrowable authorization derived from
+a key you control.
+
+## Read this first
+
+:::danger[Four authorization gaps]
+The package's own authorization logic has holes that a reader would not guess from the API surface.
+Each was verified by reading the source and confirmed by running it; each is detailed below.
+
+1. **`GenerateJWTToken`, `GenerateModuleJWTToken`, `VerifyJWTToken` and `VerifyModuleJWTToken` sign
+   and verify with HS256 under the hardcoded secret `"sonr-ucan-secret"`**, which is compiled into
+   the package and therefore known to anyone with the source. Any party can mint a token these
+   functions accept.
+2. **Caveat validation is a no-op.** Every `validate*Caveat` helper in `verifier.go` returns `nil`
+   unconditionally, so a caveat such as `"owner"` or `"max-amount"` restricts nothing.
+3. **`MPCTokenBuilder.CreateDelegatedToken` does not enforce attenuation** — it will happily sign a
+   child token that grants *more* than its parent. Only `KeyshareSource.NewAttenuatedToken` checks
+   the subset property.
+4. **`RevokeCapability` effectively does nothing**, because it revokes a *freshly minted* token
+   string rather than the one you issued.
+
+The MPC-signed path has real cryptography behind it, but two further constraints apply: verification
+as written requires possession of the signer's enclave, and `MPCVerifier.VerifyMPCToken` currently
+fails outright because `"MPC256"` is never registered with `golang-jwt`. Both are covered under
+[MPC signing and verification](#mpc-signing-and-verification).
+:::
+
+## The capability model
+
+Two interfaces carry the whole model.
+
+```go
+type Capability interface {
+	GetActions() []string          // the actions this capability grants
+	Grants(abilities []string) bool // does it grant all of these?
+	Contains(other Capability) bool // does it subsume another capability?
+	String() string
+}
+
+type Resource interface {
+	GetScheme() string          // "ipfs", "did", "dwn", "service", ...
+	GetValue() string           // the path/identifier
+	GetURI() string             // the full "scheme://value"
+	Matches(other Resource) bool // equivalence, by URI
+}
+
+type Attenuation struct {
+	Capability Capability `json:"can"`
+	Resource   Resource   `json:"with"`
+}
+```
+
+`AttenuationList` is `[]Attenuation` with query helpers:
+
+<TypeTable
+  type={{
+    "Contains": { type: "func(resourceURI string) bool", description: "Is there any attenuation whose resource URI matches exactly?" },
+    "GetCapabilitiesForResource": { type: "func(resourceURI string) []Capability", description: "All capabilities attached to that exact URI." },
+    "CanPerform": { type: "func(resourceURI string, actions []string) bool", description: "Does any capability on that URI grant every one of these actions?" },
+    "IsSubsetOf": { type: "func(parent AttenuationList) bool", description: "Every child attenuation must be matched by a parent whose resource Matches and whose capability Contains it." },
+  }}
+/>
+
+### Attenuation
+
+Attenuation is the invariant that makes UCAN safe to hand around: **a delegated token may only
+narrow its parent's authority, never widen it.** `IsSubsetOf` is the check:
+
+```go
+parent := ucan.AttenuationList{
+	ucan.CreateMultiAttenuation([]string{"read", "write", "delete"}, "service://api"),
+}
+child := ucan.AttenuationList{
+	ucan.CreateSimpleAttenuation("read", "service://api"),
+}
+
+child.IsSubsetOf(parent) // true  — narrower
+parent.IsSubsetOf(child) // false — wider
+```
+
+The rule composes: for every attenuation in the child list there must exist a parent attenuation
+whose `Resource.Matches` is true *and* whose `Capability.Contains` is true. Resource matching is
+plain URI string equality (`SimpleResource.Matches`), so there is no prefix or wildcard matching at
+the resource level — only at the action level, via `"*"`.
+
+### Capability types
+
+Every type below implements `Capability`. The module-specific ones exist so that a verifier can pick
+the right caveat and serialization path from the resource scheme.
+
+| Type | Shape | Grants semantics |
+| --- | --- | --- |
+| `SimpleCapability` | `{Action string}` | Grants exactly its one action |
+| `MultiCapability` | `{Actions []string}` | Grants every requested action present in the set |
+| `VaultCapability` | `Action`, `Actions`, `VaultAddress`, `Caveats`, `EnclaveDataCID`, `Metadata` | Vault operations; JSON tags `can`/`vault`/`cavs` |
+| `DIDCapability` | `Action`, `Actions`, `Caveats`, `Metadata` | DID document operations |
+| `DWNCapability` | `Action`, `Actions`, `Caveats`, `Metadata` | Decentralized Web Node records |
+| `DEXCapability` | plus `MaxAmount string` | Swap/liquidity operations with an amount cap |
+| `CrossModuleCapability` | `{Modules map[string]Capability}` | Composes per-module capabilities |
+| `GaslessCapability` | embeds `Capability`, plus `AllowGasless bool`, `GasLimit uint64` | Decorator; adds `SupportsGasless()` and `GetGasLimit()` |
+
+`GetActions()` on the module types returns `Actions` when non-empty and `[]string{Action}` otherwise;
+`Grants` short-circuits to `true` when `Action == "*"`.
+
+Resources mirror them, each embedding `SimpleResource`: `VaultResource` (`VaultAddress`,
+`EnclaveDataCID`), `VaultResourceExt`, `DIDResource` (`DIDMethod`, `DIDSubject`), `DWNResource`
+(`RecordType`, `Protocol`, `Owner`), `DEXResource` (`PoolID`, `AssetPair`, `OrderID`), and
+`ServiceResource` (`ServiceID`, `Domain`, plus `SupportsDelegate()`).
+
+### Constructors
+
+<TypeTable
+  type={{
+    "CreateSimpleAttenuation": { type: "func(action, resourceURI string) Attenuation", description: "SimpleCapability + a SimpleResource parsed from the URI." },
+    "CreateMultiAttenuation": { type: "func(actions []string, resourceURI string) Attenuation", description: "MultiCapability + SimpleResource." },
+    "CreateVaultAttenuation": { type: "func(actions []string, enclaveDataCID, vaultAddress string) Attenuation", description: "MultiCapability + VaultResource with scheme \"ipfs\" and URI \"ipfs://<cid>\"." },
+    "CreateDIDAttenuation": { type: "func(actions []string, didPattern string, caveats []string) Attenuation", description: "DIDCapability + DIDResource with URI \"did:<pattern>\"." },
+    "CreateDWNAttenuation": { type: "func(actions []string, recordPattern string, caveats []string) Attenuation", description: "DWNCapability + DWNResource." },
+    "CreateDEXAttenuation": { type: "func(actions []string, poolPattern string, caveats []string, maxAmount string) Attenuation", description: "DEXCapability + DEXResource." },
+    "CreateServiceAttenuation": { type: "func(actions []string, serviceID, domain string) Attenuation", description: "MultiCapability + ServiceResource with URI \"service://<id>\"." },
+    "NewCapability": { type: "func(issuer, resource string, abilities []string) (Attenuation, error)", description: "MultiCapability + SimpleResource with scheme \"generic\". The issuer argument is IGNORED and the error is always nil." },
+    "VaultAttenuationConstructor": { type: "func(m map[string]any) (Attenuation, error)", description: "Builds a vault attenuation from a decoded claim map, running ValidateVaultCapability first." },
+  }}
+/>
+
+:::note
+`CreateVaultAttenuation(actions, enclaveDataCID, vaultAddress)` takes the CID **before** the address.
+`MPCTokenBuilder.CreateVaultCapabilityToken(aud, vaultAddress, enclaveDataCID, ...)` takes them in
+the opposite order. Getting these backwards produces a token whose resource URI is
+`ipfs://<vault-address>`, which will pass CID-format validation only if the address happens to look
+like a CID — usually it silently fails later.
+:::
+
+## The `Token` type
+
+```go
+type Token struct {
+	Raw          string        `json:"raw"`
+	Issuer       string        `json:"iss"`
+	Audience     string        `json:"aud"`
+	ExpiresAt    int64         `json:"exp,omitempty"`
+	NotBefore    int64         `json:"nbf,omitempty"`
+	Attenuations []Attenuation `json:"att"`
+	Proofs       []Proof       `json:"prf,omitempty"`
+	Facts        []Fact        `json:"fct,omitempty"`
+}
+
+type Proof string             // a JWT string or a CID
+type Fact struct{ Data json.RawMessage `json:"data"` }
+```
+
+`Raw` is the encoded JWT when the token came from a verifier or a signing builder, and `""` when it
+came from `TokenBuilder`, which does not sign.
+
+### `TokenBuilder`
+
+`TokenBuilder` and `TokenBuilderInterface` (`CreateOriginToken`, `CreateDelegatedToken`) live in
+`ucan/stubs.go` and are exactly what the filename says: they assemble a `*Token` struct with
+`Raw: ""` and no signature. `CreateDelegatedToken` copies `parentToken.Raw` into `Proofs` if it is
+non-empty and sets `Audience: parentToken.Issuer`.
+
+They exist because `NewVaultAdminToken(builder TokenBuilderInterface, vaultOwnerDID, vaultAddress,
+enclaveDataCID string, exp time.Time)` takes the interface. Pass an `MPCTokenBuilder`-backed
+implementation if you need a signed result; `&TokenBuilder{}` gives you an unsigned struct.
+
+## MPC signing and verification
+
+This is the path with real cryptography. `MPCSigningMethod` plugs an
+[`mpc.Enclave`](/identity/mpc-enclave) into `golang-jwt/jwt/v5`:
+
+```go
+func NewMPCSigningMethod(name string, enclave mpc.Enclave) *MPCSigningMethod
+func (m *MPCSigningMethod) Alg() string  // returns m.Name; "MPC256" everywhere in this package
+func (m *MPCSigningMethod) Sign(signingString string, key any) ([]byte, error)
+func (m *MPCSigningMethod) Verify(signingString string, signature []byte, key any) error
+```
+
+`Sign` computes `sha256.Sum256(signingString)` and passes that digest to `enclave.Sign`, which
+hashes again with SHA3-256 internally. `Verify` does the mirror image via `enclave.Verify`.
+
+:::danger[MPC verification requires the signer's enclave]
+`MPCSigningMethod.Verify` **ignores its `key` argument entirely** and calls `m.enclave.Verify(...)`.
+`MPCVerifier.verifyWithMPC` likewise constructs `NewMPCSigningMethod("MPC256", v.enclave)` and hands
+`jwt.Parse` a key func that returns `(nil, nil)`.
+
+So a relying party can only verify an MPC-signed token if it holds an `mpc.Enclave` for the *same
+key* — and an enclave holds both keyshares. That inverts the point of public-key verification: the
+public key alone is sufficient information to verify (`mpc.VerifyWithPubKey(pubBytes, digest, sig)`
+does exactly that), but this method does not take that path.
+
+Compounding it, the `ucan` package never calls `jwt.RegisterSigningMethod("MPC256", ...)`. jwt/v5
+resolves a token's `alg` header through its global registry, so `jwt.Parse` inside
+`verifyWithMPC` fails with an unavailable-signing-method error unless something else has registered
+`"MPC256"`. The only registration in the module is in `mpc/spec`'s `init()`, and that one installs a
+*broken* implementation with a nil enclave (see [`mpc/spec`](/identity/mpc-enclave)).
+
+**Practical consequence: `MPCVerifier.VerifyMPCToken` does not currently verify MPC-signed tokens.**
+Measured against a token freshly minted by `MPCTokenBuilder.CreateOriginToken`, it returns:
+
+```text
+MPC token verification failed: token is unverifiable: signing method (alg) is unavailable
+```
+
+To validate a signature yourself, extract the parts and check them directly. The digest chain is
+`SHA3-256(SHA-256(signingString))`, so pass the SHA-256 digest as `data` and let
+`VerifyWithPubKey` apply the SHA3-256 layer:
+
+```go
+unsigned, err := ucan.ExtractUnsignedToken(tokenString) // header.payload
+sig, err := ucan.ExtractSignature(tokenString)         // decoded bytes
+digest := sha256.Sum256([]byte(unsigned))
+ok, err := mpc.VerifyWithPubKey(enclave.PubKeyBytes(), digest[:], sig)
+```
+
+That path was verified end to end against this package: it returns `(true, nil)` for a real
+`MPCTokenBuilder` token and `(false, nil)` when a byte of the signing string is altered.
+:::
+
+### Builders and validators
+
+<TypeTable
+  type={{
+    "NewMPCTokenBuilder": { type: "func(enclave mpc.Enclave) (*MPCTokenBuilder, error)", description: "Errors if !enclave.IsValid(). Derives the issuer DID and address from enclave.PubKeyBytes()." },
+    "MPCTokenBuilder.CreateOriginToken": { type: "func(audienceDID string, att []Attenuation, facts []Fact, notBefore, expiresAt time.Time) (*Token, error)", description: "Root token: no proofs." },
+    "MPCTokenBuilder.CreateDelegatedToken": { type: "func(parent *Token, audienceDID string, att []Attenuation, facts []Fact, notBefore, expiresAt time.Time) (*Token, error)", description: "Attaches the parent as a proof. Does NOT check the subset property — see the callout below." },
+    "MPCTokenBuilder.CreateVaultCapabilityToken": { type: "func(audienceDID, vaultAddress, enclaveDataCID string, actions []string, expiresAt time.Time) (*Token, error)", description: "Convenience origin token carrying a single vault attenuation." },
+    "MPCTokenBuilder.GetIssuerDID": { type: "func() string", description: "The did:key derived from the enclave public key." },
+    "MPCTokenBuilder.GetAddress": { type: "func() string", description: "keys.DID.Address() — a truncated hex prefix, not a chain address." },
+    "NewMPCCapabilityBuilder": { type: "func(enclave mpc.Enclave) (*MPCCapabilityBuilder, error)", description: "Emits vault attenuations: CreateVaultAdminCapability, CreateVaultReadOnlyCapability, CreateVaultSigningCapability, CreateCustomCapability." },
+    "NewMPCKeyshareSource": { type: "func(enclave mpc.Enclave) (KeyshareSource, error)", description: "The higher-level source interface — see below." },
+  }}
+/>
+
+`KeyshareSource` bundles identity and token minting over one enclave:
+
+```go
+type KeyshareSource interface {
+	Address() string
+	Issuer() string
+	ChainCode() ([]byte, error)
+	OriginToken() (*Token, error)
+	SignData(data []byte) ([]byte, error)
+	VerifyData(data []byte, sig []byte) (bool, error)
+	Enclave() mpc.Enclave
+
+	NewOriginToken(audienceDID string, att []Attenuation, fct []Fact, notBefore, expires time.Time) (*Token, error)
+	NewAttenuatedToken(parent *Token, audienceDID string, att []Attenuation, fct []Fact, nbf, exp time.Time) (*Token, error)
+}
+```
+
+`ChainCode()` signs the address string with the enclave. Because DKLs18 ECDSA signing is randomized,
+**`ChainCode()` returns different 32 bytes on every call** despite the doc comment calling it
+deterministic — measured directly: two successive calls on the same source disagree. Treat it as a
+fresh signature, not a derivation.
+
+:::danger[Only `KeyshareSource` enforces attenuation at issuance]
+There are two delegation APIs and they behave differently. `mpcKeyshareSource.NewAttenuatedToken`
+checks the subset property first:
+
+```go
+// ucan/source.go
+if !isAttenuationSubset(att, parent.Attenuations) {
+	return nil, fmt.Errorf("scope of ucan attenuations must be less than its parent")
+}
+```
+
+`MPCTokenBuilder.CreateDelegatedToken` does **not**. Its only pre-step is
+`prepareDelegationProofs(parent, attenuations)`, which is the stub in `ucan/stubs.go` that ignores
+its `capabilities` argument entirely and returns `[]Proof{parent.Raw}`. Nothing compares the child's
+attenuations against the parent's.
+
+Measured against this package, with a parent granting only `read` on `service://api` and a child
+asking for `read, delete`:
+
+| API | Result |
+| --- | --- |
+| `MPCTokenBuilder.CreateDelegatedToken` | `nil` — **widened token issued and signed** |
+| `KeyshareSource.NewAttenuatedToken` | `"scope of ucan attenuations must be less than its parent"` |
+
+A widened token from `MPCTokenBuilder` is a validly signed token whose `att` claims more authority
+than its proof grants. Whether that is caught depends entirely on the relying party calling
+`VerifyDelegationChain` — and nothing in `MPCTokenBuilder` makes that happen.
+
+**Use `ucan.NewMPCKeyshareSource(enclave).NewAttenuatedToken(...)` for delegation.** Note it also
+flattens the chain: it appends `parent.Raw` *and* all of `parent.Proofs`, so the child carries the
+whole ancestry rather than a single link.
+:::
+
+### Verification plumbing
+
+```go
+type DIDResolver interface {
+	ResolveDIDKey(ctx context.Context, did string) (keys.DID, error)
+}
+```
+
+| Resolver | Behaviour |
+| --- | --- |
+| `StringDIDResolver{}` | `keys.Parse(didStr)` — pure decode, no network |
+| `MPCDIDResolver` (`NewMPCDIDResolver(enclave, fallback)`) | Short-circuits its own enclave-derived DID; otherwise delegates to `fallback`, or `keys.Parse` if `fallback` is nil |
+
+`Verifier` is the general path:
+
+<TypeTable
+  type={{
+    "NewVerifier": { type: "func(didResolver DIDResolver) *Verifier", description: "Constructs a verifier over a DID resolver." },
+    "VerifyToken": { type: "func(ctx, tokenString string) (*Token, error)", description: "jwt.Parse with a resolver-backed key func, then parses att/prf/fct and checks iss, aud, at least one attenuation, nbf and exp." },
+    "VerifyCapability": { type: "func(ctx, tokenString, resource string, abilities []string) (*Token, error)", description: "VerifyToken plus: some attenuation's resource URI equals `resource` exactly and its capability Grants all `abilities`." },
+    "VerifyDelegationChain": { type: "func(ctx, tokenString string) error", description: "Verifies the token, then every JWT in Proofs, then the delegation relationship between each pair." },
+  }}
+/>
+
+:::warning[`Verifier` supports only RSA and Ed25519 issuers]
+`Verifier.keyFunc` switches on the token's signing method and handles exactly `RS256`, `RS384`,
+`RS512` and `EdDSA`; anything else returns `"unsupported signing method"`. Since a `did:key` derived
+from an MPC enclave is a **secp256k1** key, `getRSAPublicKey` and `getEd25519PublicKey` both reject
+it. `Verifier.VerifyToken` therefore cannot verify tokens issued by an enclave — which is why
+`MPCVerifier.VerifyMPCToken` tries `VerifyToken` first and falls through to `verifyWithMPC`.
+:::
+
+`MPCVerifier` and `MPCTokenValidator` layer on top:
+
+```go
+func NewMPCVerifier(enclave mpc.Enclave) *MPCVerifier
+func (v *MPCVerifier) VerifyMPCToken(ctx context.Context, tokenString string) (*Token, error)
+
+func NewMPCTokenValidator(enclave mpc.Enclave, enableEnclaveValidation bool) *MPCTokenValidator
+func (v *MPCTokenValidator) ValidateTokenForResource(ctx, tokenString, resourceURI string, requiredAbilities []string) (*Token, error)
+func (v *MPCTokenValidator) ValidateTokenForVaultOperation(ctx, tokenString, enclaveDataCID, requiredAction, vaultAddress string) (*Token, error)
+```
+
+`ValidateTokenForVaultOperation` is the most complete check in the package, in five ordered steps:
+verify the token, `ValidateVaultTokenCapability`, optionally match the enclave-data CID, optionally
+match the vault address, and finally `VerifyDelegationChain` if `Proofs` is non-empty. The two
+"optionally" steps run only when `enableEnclaveValidation` was true at construction — pass `true`
+unless you know why not.
+
+### Signature helpers
+
+<TypeTable
+  type={{
+    "SupportedSigningMethods": { type: "func() []jwt.SigningMethod", description: "RS256, RS384, RS512, EdDSA. Note: no ECDSA and no MPC256." },
+    "ValidateSignature": { type: "func(tokenString string, verifyKey any) error", description: "Parses and validates the signature against a supplied key." },
+    "ExtractUnsignedToken": { type: "func(tokenString string) (string, error)", description: "The \"header.payload\" prefix — the exact bytes that were signed." },
+    "ExtractSignature": { type: "func(tokenString string) ([]byte, error)", description: "The decoded third segment." },
+    "ExtractSignatureInfo": { type: "func(tokenString string, verifyKey any) (*SignatureInfo, error)", description: "Algorithm, key type, signing string, signature, and validity in one struct." },
+    "GetHashAlgorithmForMethod": { type: "func(method jwt.SigningMethod) (crypto.Hash, error)", description: "The crypto.Hash a signing method expects." },
+    "CreateHasher": { type: "func(hashAlg crypto.Hash) (hash.Hash, error)", description: "Instantiates that hash." },
+    "VerifyEd25519Signature": { type: "func(signingString string, signature []byte, publicKey ed25519.PublicKey) error", description: "Raw Ed25519 verification over the signing string." },
+    "VerifyRSASignature": { type: "func(signingString string, signature []byte, publicKey *rsa.PublicKey, hashAlg crypto.Hash) error", description: "Raw RSA verification." },
+    "NewSigningValidator": { type: "func() *SigningValidator", description: "Allows every method in SupportedSigningMethods. ValidateSigningMethod and ValidateTokenSignature." },
+    "NewKeyValidator": { type: "func() *KeyValidator", description: "ValidateEd25519PublicKey and ValidateRSAPublicKey." },
+  }}
+/>
+
+### `SecurityConfig`
+
+<TypeTable
+  type={{
+    "AllowedSigningMethods": {
+      type: "[]jwt.SigningMethod",
+      required: true,
+      description: "Permitted JWT algorithms.",
+      default: "SupportedSigningMethods() — RS256, RS384, RS512, EdDSA"
+    },
+    "MinRSAKeySize": {
+      type: "int",
+      required: true,
+      description: "Smallest accepted RSA modulus in bits. ValidateSecurityConfig rejects anything below 1024.",
+      default: "2048"
+    },
+    "MaxRSAKeySize": {
+      type: "int",
+      required: true,
+      description: "Largest accepted RSA modulus. Must be >= MinRSAKeySize and <= 16384.",
+      default: "8192"
+    },
+    "RequireSecureAlgs": {
+      type: "bool",
+      required: true,
+      description: "Marks the config as rejecting weak algorithms.",
+      default: "true"
+    },
+  }}
+/>
+
+`RestrictiveSecurityConfig()` narrows those to `{RS256, EdDSA}`, `MinRSAKeySize: 3072`,
+`MaxRSAKeySize: 4096`, `RequireSecureAlgs: true`. `ValidateSecurityConfig(config)` enforces the
+bounds noted above.
+
+:::warning
+`SecurityConfig` is a value object with a validator. Nothing in the package *consumes* it — neither
+`Verifier` nor `MPCVerifier` nor `SigningValidator` takes one. Constructing and validating a config
+does not change how any verification behaves; wire the allow-list yourself with
+`NewSigningValidatorWithMethods(config.AllowedSigningMethods)`.
+:::
+
+## Templates and policy
+
+`CapabilityTemplate` is an allow-list of actions per resource scheme, plus lifetime bounds.
+
+<TypeTable
+  type={{
+    "AllowedActions": {
+      type: "map[string][]string",
+      required: true,
+      description: "resource scheme -> permitted actions. A scheme that is ABSENT from the map is allowed unconditionally.",
+      default: "empty map"
+    },
+    "DefaultExpiration": {
+      type: "time.Duration",
+      required: true,
+      description: "Used by GetDefaultExpirationTime().",
+      default: "24h"
+    },
+    "MaxExpiration": {
+      type: "time.Duration",
+      required: true,
+      description: "ValidateExpiration rejects an exp further out than this.",
+      default: "720h (30 days)"
+    },
+  }}
+/>
+
+```go
+tpl := ucan.NewCapabilityTemplate()
+tpl.AddAllowedActions("service", []string{"read", "write"})
+
+err := tpl.ValidateAttenuation(ucan.CreateSimpleAttenuation("delete", "service://api"))
+// -> "action delete not allowed for resource type service"
+
+err = tpl.ValidateExpiration(tpl.GetDefaultExpirationTime()) // nil
+```
+
+`ValidateExpiration` treats `expiresAt == 0` as "no expiration" and returns `nil`; a past timestamp
+errors, and one beyond `MaxExpiration` errors. `"*"` in an attenuation is only accepted if `"*"` is
+itself in the allow-list for that scheme.
+
+:::warning[Unknown schemes are allowed, not denied]
+`ValidateAttenuation` returns `nil` when the resource scheme is missing from `AllowedActions`, with
+the comment "Allow unknown resource types for backward compatibility". A template is therefore a
+*deny-list of known-bad actions on known schemes*, not an allow-list. `CreateSimpleAttenuation("nuke",
+"unknown://everything")` validates cleanly against every template in the package.
+:::
+
+Prebuilt templates, each a `NewCapabilityTemplate()` with one or two schemes populated:
+
+| Function | Schemes populated |
+| --- | --- |
+| `StandardVaultTemplate()` | `ipfs`, `vault` |
+| `StandardServiceTemplate()` | `service`, `https`, `http` |
+| `StandardDIDTemplate()` | `did` |
+| `StandardDWNTemplate()` | `dwn` |
+| `StandardDEXTemplate()` | `dex` |
+| `EnhancedServiceTemplate()` | `service`, with delegation actions |
+
+`StandardTemplate` is a package-level `var` populated in `ucan/jwt.go`'s `init()` with actions for
+`vault`, `service`, `did`, `dwn`, `dex`, `pool` and `svc`. It is the template that
+`VerifyJWTToken` and `VerifyModuleJWTToken` validate against.
+
+:::danger[`StandardTemplate` is mutable global state]
+It is an exported pointer, and `AddAllowedActions` mutates it in place. Any code — including a test,
+as `ucan/ucan_test.go` does — can widen the allow-list that every `VerifyJWTToken` call in the
+process then honours. Build your own template with `NewCapabilityTemplate()` for anything that
+matters.
+:::
+
+## Vault and IPFS integration
+
+Vault capabilities address an enclave backup stored in IPFS, so the resource URI is `ipfs://<CID>`.
+
+<TypeTable
+  type={{
+    "VaultCapabilitySchema": { type: "z.Struct", description: "A zog schema requiring `can` from a fixed action set, `with` as a valid ipfs:// URI, a non-empty `vault`, and optional `actions`/`cavs`." },
+    "ValidateVaultCapability": { type: "func(att map[string]any) error", description: "Runs a decoded attenuation map through VaultCapabilitySchema." },
+    "ValidateVaultTokenCapability": { type: "func(token *Token, enclaveDataCID, requiredAction string) error", description: "Requires requiredAction in {read, write, sign, export, import, delete} and an attenuation on ipfs://<cid> granting it." },
+    "GetEnclaveDataCID": { type: "func(token *Token) (string, error)", description: "The first attenuation resource with an ipfs:// prefix, minus the prefix." },
+    "ValidateIPFSCID": { type: "func(value *string, ctx z.Ctx) bool", description: "zog TestFunc: requires an ipfs:// prefix and a well-formed CID." },
+    "ValidateEnclaveDataCIDIntegrity": { type: "func(enclaveDataCID string, enclaveData []byte) error", description: "Recomputes the CID over the bytes and compares. Errors on an empty CID, empty data, a malformed CID, or a mismatch." },
+    "ValidateEnclaveDataIntegrity": { type: "func(enclaveData *mpc.EnclaveData, expectedCID string) error", description: "Structural checks on the EnclaveData (non-nil, non-empty PubBytes) before the CID comparison." },
+  }}
+/>
+
+`VaultAdminAction` is the constant `"vault/admin"`. Note that the vault schema's `can` set uses
+slash-prefixed values (`vault/read`, `vault/sign`, …) while `ValidateVaultTokenCapability` and the
+templates use bare ones (`read`, `sign`, …); they are different vocabularies applied at different
+layers.
+
+`TestValidateEnclaveDataCIDIntegrity` in `ucan/ucan_test.go` is the one genuinely end-to-end test in
+the package, covering empty-CID, empty-data, malformed-CID, matching and mismatching cases.
+
+## End-to-end example
+
+Enclave → issuer DID → signed origin token → narrowed delegated token → manual signature check.
+This uses `KeyshareSource`, the delegation API that actually enforces attenuation. Every line was
+run against this package; the printed values below are the observed output.
+
+```go ucan_delegation.go
+package main
+
+import (
+	"crypto/sha256"
+	"fmt"
+	"time"
+
+	"github.com/sonr-io/crypto/keys"
+	"github.com/sonr-io/crypto/mpc"
+	"github.com/sonr-io/crypto/ucan"
+)
+
+func main() {
+	enclave, err := mpc.NewEnclave()
+	if err != nil {
+		panic(err)
+	}
+
+	// KeyshareSource enforces the subset property on delegation.
+	src, err := ucan.NewMPCKeyshareSource(enclave)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("issuer:", src.Issuer()) // did:key:z...
+
+	// The delegate's identity — here just another enclave's DID.
+	delegateEnclave, err := mpc.NewEnclave()
+	if err != nil {
+		panic(err)
+	}
+	delegateDID, err := keys.NewFromMPCPubKey(delegateEnclave.PubKeyBytes())
+	if err != nil {
+		panic(err)
+	}
+
+	now := time.Now()
+
+	// Origin token: broad authority over one service resource.
+	origin, err := src.NewOriginToken(
+		delegateDID.String(),
+		[]ucan.Attenuation{
+			ucan.CreateMultiAttenuation([]string{"read", "write", "delete"}, "service://api"),
+		},
+		nil, now, now.Add(time.Hour),
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	// Widening is rejected at issuance.
+	_, err = src.NewAttenuatedToken(origin, delegateDID.String(),
+		[]ucan.Attenuation{
+			ucan.CreateMultiAttenuation([]string{"read", "write", "delete", "admin"}, "service://api"),
+		},
+		nil, now, now.Add(time.Hour))
+	fmt.Println("widening rejected:", err)
+	// -> "scope of ucan attenuations must be less than its parent"
+
+	// Narrowing is accepted: read only, half the lifetime.
+	delegated, err := src.NewAttenuatedToken(origin, delegateDID.String(),
+		[]ucan.Attenuation{ucan.CreateSimpleAttenuation("read", "service://api")},
+		nil, now, now.Add(30*time.Minute))
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("proofs:", len(delegated.Proofs)) // 1 — the origin token
+
+	// The attenuation invariant, checked locally.
+	child := ucan.AttenuationList(delegated.Attenuations)
+	parent := ucan.AttenuationList(origin.Attenuations)
+	fmt.Println("narrows:", child.IsSubsetOf(parent)) // true
+	fmt.Println("widens:", parent.IsSubsetOf(child))  // false
+	fmt.Println("can read:", child.CanPerform("service://api", []string{"read"}))     // true
+	fmt.Println("can delete:", child.CanPerform("service://api", []string{"delete"})) // false
+
+	// Signature verification, done directly against the public key.
+	unsigned, err := ucan.ExtractUnsignedToken(delegated.Raw)
+	if err != nil {
+		panic(err)
+	}
+	sig, err := ucan.ExtractSignature(delegated.Raw)
+	if err != nil {
+		panic(err)
+	}
+	digest := sha256.Sum256([]byte(unsigned))
+	ok, err := mpc.VerifyWithPubKey(enclave.PubKeyBytes(), digest[:], sig)
+	fmt.Println("signature valid:", ok, err) // true <nil>
+}
+```
+
+:::warning
+There is **no test in the repository** that mints an MPC-signed token and verifies it back through
+the package's own verifier — and per the callout above, `VerifyMPCToken` does not currently work.
+The manual check at the end of this program is the path that does, and it was confirmed to return
+`(true, nil)` for a genuine token and `(false, nil)` for a tampered signing string.
+:::
+
+## Not actually implemented
+
+Each item below was verified by reading the named source file and then confirmed by running it.
+Delegation enforcement is covered separately, under
+[Only `KeyshareSource` enforces attenuation at issuance](#mpc-signing-and-verification).
+
+:::danger[`GenerateJWTToken` / `VerifyJWTToken` use a hardcoded HS256 secret]
+In `ucan/jwt.go`, all four of `GenerateJWTToken`, `GenerateModuleJWTToken`, `VerifyJWTToken` and
+`VerifyModuleJWTToken` do this:
+
+```go
+token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+tokenString, err := token.SignedString([]byte("sonr-ucan-secret"))
+```
+
+```go
+token, err := jwt.Parse(tokenString, func(token *jwt.Token) (any, error) {
+	// Dummy secret verification - replace with proper key validation
+	return []byte("sonr-ucan-secret"), nil
+}, jwt.WithLeeway(5*time.Minute))
+```
+
+The secret is a string literal in the package source. Anyone who can read this repository can mint a
+token that `VerifyJWTToken` accepts, with any issuer, audience and attenuation set — bounded only by
+`StandardTemplate`, which is itself mutable.
+
+`GenerateJWTToken` additionally hardcodes `"iss": "did:sonr:local"` and ignores any notion of an
+audience, and it base64-encodes a single `{can, with}` object into a non-standard `can` claim rather
+than emitting a UCAN `att` array. `GenerateModuleJWTToken` does use `att` and takes real issuer and
+audience arguments — but signs with the same shared secret.
+
+**Treat all four as demo scaffolding.** Use `MPCTokenBuilder` for issuance and verify signatures
+explicitly.
+:::
+
+:::danger[Caveat restrictions are not enforced]
+`Verifier.checkCapabilities` calls `validateCaveats(cap, resource)`, which dispatches by resource
+scheme into `validateDIDCaveats`, `validateDWNCaveats`, `validateDEXCaveats`,
+`validateServiceCaveats` and `validateVaultCaveats`. Those iterate the capability's `Caveats` slice
+and call a per-caveat helper. **Every one of those helpers is a stub that returns `nil`:**
+
+```go
+// Caveat validation helper methods (placeholders for actual implementation)
+
+func (v *Verifier) validateOwnerCaveat(resource Resource) error          { return nil }
+func (v *Verifier) validateControllerCaveat(resource Resource) error     { return nil }
+func (v *Verifier) validateRecordOwnership(resource Resource) error      { return nil }
+func (v *Verifier) validateProtocolCaveat(resource Resource) error       { return nil }
+func (v *Verifier) validateMaxAmountCaveat(maxAmount string) error       { return nil }
+func (v *Verifier) validatePoolMembershipCaveat(resource Resource) error { return nil }
+func (v *Verifier) validateVaultOwnership(vaultAddress string) error     { return nil }
+func (v *Verifier) validateEnclaveIntegrity(enclaveDataCID string) error { return nil }
+```
+
+`validateServiceCaveats` returns `nil` without inspecting anything at all, and `validateCaveats`
+returns `nil` for any scheme outside its switch.
+
+The same holds on the delegation path. `areCaveatsMoreRestrictive(childCaveats, parentCaveats)`
+builds a set from the parent, then loops over the child caveats with `continue` as the only
+statement in the loop body, and returns `true` — it is structurally incapable of returning `false`.
+`isAmountLessOrEqual(childAmount, parentAmount)` is commented "placeholder implementation" and
+returns `true`. `isModuleCapabilityContained` returns `true` in its `default` branch for any unknown
+scheme.
+
+**A caveat in a UCAN token issued or verified by this package restricts nothing.** If you rely on
+caveats for authorization — an amount cap, an ownership constraint, pool membership — you must
+enforce them in your own code after `VerifyCapability` returns.
+:::
+
+:::danger[`RevokeCapability` revokes the wrong token]
+`ucan/jwt.go` keeps an unexported `revokedTokens map[string]bool` keyed on the **full JWT string**,
+which `VerifyJWTToken` and `VerifyModuleJWTToken` consult first. But the only way to add an entry is:
+
+```go
+func RevokeCapability(attenuation Attenuation) error {
+	token, err := GenerateJWTToken(attenuation, time.Hour)
+	if err != nil {
+		return err
+	}
+	revokedTokens[token] = true
+	return nil
+}
+```
+
+It mints a *brand-new* token from the attenuation and revokes that string. Since the claims include
+`iat` and `exp` derived from `time.Now()`, the regenerated string only equals a previously issued one
+if that token was created in the same wall-clock second with the identical one-hour duration.
+
+That is exactly the window `TestCapabilityRevocation` happens to hit — it calls
+`GenerateJWTToken(att, time.Hour)` and `RevokeCapability(att)` back to back, so the two strings
+match and the assertion passes. **The test passes for an incidental reason; the mechanism does not
+work.** There is no API to revoke a token you actually hold, and the map is process-local,
+unbounded and never persisted.
+:::
+
+Measured against this package:
+
+| Sequence | `VerifyJWTToken` after revoking |
+| --- | --- |
+| Issue, wait 1.5 s, `RevokeCapability` | `nil` — **still accepted** |
+| Issue and `RevokeCapability` in the same second | `"token has been revoked"` |
+| Issue with a 2 h duration, `RevokeCapability` (which uses 1 h) | `nil` — **still accepted** |
+
+:::warning[`ucan/stubs.go` — what is a stub]
+The file declares four things. `TokenBuilderInterface` and `TokenBuilder` are real but do not sign
+(they set `Raw: ""`). The two unexported helpers are labelled stubs in the source:
+
+- `isValidDID(did string) bool` — "Basic DID validation stub". Returns
+  `did != "" && len(did) > 5 && did[:4] == "did:"`. No method check, no multibase check, no key
+  validation. `"did:xxxxxxxx"` passes. It gates the `audienceDID` argument in
+  `mpcKeyshareSource.newToken` and in `NewVaultAdminToken`.
+- `prepareDelegationProofs(token, capabilities)` — "Minimal stub implementation". Ignores
+  `capabilities` entirely and returns `[]Proof{token.Raw}` when `Raw` is non-empty.
+:::
+
+:::warning[No signature check on `Fact` or proof CIDs]
+`Proof` is `string` and may hold either a JWT or a CID. `VerifyDelegationChain` passes every proof to
+`VerifyToken`, which calls `jwt.Parse` — so a CID-form proof fails to parse rather than being
+resolved. The package has no proof-resolution path; CID proofs are unusable.
+:::
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="MPC Enclave" href="/identity/mpc-enclave" icon="shield">
+    The signing key behind the issuer DID, and why `mpc/spec` should be avoided.
+  </Card>
+  <Card title="did:key Identifiers" href="/identity/did-key" icon="id-card">
+    How issuer and audience strings are encoded and parsed.
+  </Card>
+  <Card title="Security Notes" href="/reference/security" icon="triangle-alert">
+    Every stub and defect in the module, in one place.
+  </Card>
+  <Card title="ECIES" href="/identity/ecies" icon="mail">
+    Encrypting a payload to the holder of a key, rather than authorizing them.
+  </Card>
+</CardGroup>

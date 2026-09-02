@@ -1,0 +1,163 @@
+---
+title: Getting started
+description: Install the module, choose a curve, and learn the conventions — constructors, round-based protocols, serialization, and error handling — that every package in this library shares.
+sidebar:
+  label: Getting started
+  order: 1
+  icon: rocket
+---
+
+## Install
+
+```bash
+go get github.com/sonr-io/crypto
+```
+
+Requires **Go 1.24.7 or newer**. Every package is imported under the module path
+`github.com/sonr-io/crypto/<package>`:
+
+```go
+import (
+	"github.com/sonr-io/crypto/core/curves"
+	"github.com/sonr-io/crypto/sharing"
+	"github.com/sonr-io/crypto/mpc"
+)
+```
+
+There is no top-level façade package — the module root holds only a cross-package security test suite.
+Import the specific primitive you need.
+
+## Pick a curve first
+
+Most constructors take a `*curves.Curve`. That single argument determines the group, the scalar
+field, and the serialization width of everything downstream, so it is the first decision you make:
+
+```go
+curve := curves.K256()   // secp256k1 — Bitcoin, Ethereum, Cosmos
+curve := curves.P256()   // NIST P-256 — WebAuthn, FIDO2, TLS
+curve := curves.ED25519() // Ed25519 — Sonr identity keys
+```
+
+Some primitives need a **pairing-friendly** curve instead, because they rely on a bilinear map.
+BBS+ signatures and the accumulator both fall in this group and take a `*curves.PairingCurve`:
+
+```go
+pairingCurve := curves.BLS12381(curves.BLS12381G1().NewGeneratorPoint())
+```
+
+Passing a plain `*curves.Curve` where a `*curves.PairingCurve` is required will not compile, which is
+the intended guardrail. See [Curves](/foundations/curves) for the full catalog and interface reference.
+
+:::note
+Curve choice is rarely free to change later. A key generated on secp256k1 has no meaning on Ed25519,
+and stored shares, commitments, and serialized proofs are all curve-specific.
+:::
+
+## Conventions worth knowing
+
+### Constructors validate, so check the error
+
+Constructors do real work — parameter validation, generator derivation, table precomputation — and
+return an `error` rather than panicking on bad input. A `NewShamir` with a threshold above its limit
+fails at construction, not at `Split` time:
+
+```go
+scheme, err := sharing.NewShamir(3, 5, curves.K256())
+if err != nil {
+	return fmt.Errorf("invalid sharing parameters: %w", err)
+}
+```
+
+### Two generations of API coexist
+
+The library carries an older, curve-specific API alongside the modern generic one. You will meet both
+in `go doc` output, and mixing them does not type-check:
+
+| Modern | Legacy | Used by |
+| --- | --- | --- |
+| `curves.Point`, `curves.Scalar` | `curves.EcPoint`, `curves.EcScalar` | `sharing/v1`, `dkg/gennaro` |
+| `sharing` | `sharing/v1` | `dkg/gennaro`, `dkg/gennaro2p` |
+| operates on `curves.Scalar` | operates on `[]byte` and `curves.Element` | — |
+
+Prefer the modern API for new code. Reach for the legacy layer only when a package you depend on
+forces it. [Foundations](/foundations) explains the split in detail.
+
+### Multi-party protocols are explicit round objects
+
+Nothing in this library hides the network. A multi-party protocol is a stateful object whose methods
+are the rounds, and you move the messages between parties yourself. Two shapes appear:
+
+<Tabs>
+  <Tab title="Named rounds">
+    Each round is a distinct method. You call them in order and route the outputs — some broadcast to
+    everyone, some point-to-point to one peer. Used by [`dkg/frost`](/threshold/dkg),
+    [`dkg/gennaro`](/threshold/dkg), and [`ted25519/frost`](/threshold/threshold-ed25519).
+
+    ```go
+    bcast, p2p, err := participant.Round1(secret)
+    // broadcast `bcast` to all; send p2p[peerID] privately to each peer
+    ```
+  </Tab>
+  <Tab title="Iterator crank">
+    The protocol is a `protocol.Iterator`: you feed it the counterparty's message and it returns the
+    next one, until it signals completion and you read `Result`. Used by
+    [`tecdsa/dklsv1`](/threshold/threshold-ecdsa) and, wrapped up entirely, by
+    [`mpc`](/identity/mpc-enclave).
+
+    ```go
+    msg, err := alice.Next(bobMsg)
+    ```
+  </Tab>
+</Tabs>
+
+Calling rounds out of order is an error, not undefined behavior — the objects track their own state.
+See [Protocol messages](/foundations/protocol) for the iterator contract.
+
+### Serialization is per-type, not reflective
+
+Keys, shares, proofs, and signatures implement their own codecs — usually
+`MarshalBinary`/`UnmarshalBinary`, sometimes `MarshalJSON`/`UnmarshalJSON`, and in the DKG packages
+`Encode`/`Decode`. Use them rather than reflecting over struct fields with `encoding/gob` or a
+generic JSON marshal, because unexported field state and curve identity would be lost.
+
+Unmarshalling frequently needs to know the curve up front, since the wire bytes alone do not identify
+it. The idiom is to initialize an empty value on the right curve, then unmarshal into it:
+
+```go
+sig := new(bbs.Signature).Init(pairingCurve)
+if err := sig.UnmarshalBinary(data); err != nil {
+	return err
+}
+```
+
+### Randomness is injected
+
+Anything that consumes entropy takes an `io.Reader`, so tests can be deterministic and production
+code is explicit about its source. Pass `crypto/rand.Reader` unless you have a specific reason not to:
+
+```go
+shares, err := scheme.Split(secret, rand.Reader)
+```
+
+:::danger
+A deterministic or repeated reader in production is a key-recovery bug, not a performance
+optimization. Several protocols here — Ed25519 nonce generation especially — leak the signing key
+outright if the same randomness is used for two different messages.
+:::
+
+## Where to next
+
+<CardGroup cols={2}>
+  <Card title="Foundations" href="/foundations" icon="layers">
+    The curve, point, and scalar model that the rest of the library is written against.
+  </Card>
+  <Card title="Package index" href="/reference/packages" icon="list">
+    Every importable package and the page that documents it.
+  </Card>
+  <Card title="Security notes" href="/reference/security" icon="shield-alert">
+    Stubs, known defects, and non-constant-time paths found while documenting the code.
+  </Card>
+  <Card title="MPC enclave" href="/identity/mpc-enclave" icon="shield">
+    The highest-level entry point: threshold ECDSA as a single value.
+  </Card>
+</CardGroup>
