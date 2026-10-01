@@ -8,7 +8,7 @@ require (
 	github.com/Oudwins/zog v0.21.6
 	github.com/btcsuite/btcd/btcec/v2 v2.3.4
 	github.com/bwesterb/go-ristretto v1.2.3
-	github.com/consensys/gnark-crypto v0.19.0
+	github.com/consensys/gnark-crypto v0.19.1
 	github.com/cosmos/btcutil v1.0.5
 	github.com/cosmos/cosmos-sdk v0.53.4
 	github.com/dustinxie/ecc v0.0.0-20210511000915-959544187564
